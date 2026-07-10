@@ -116,7 +116,7 @@ func main() {
 	authenticateapi.LogonCodeRoutes(service, logonCodeHandler, ratelimiter)
 	socialRepository := social.NewPostgresSocialRepository(pool)
 	socialService := social.NewDefaultSocialService(accountRepository, socialRepository,
-		tokenizer, config.PasswordCost)
+		tokenizer, txManager, config.PasswordCost)
 	if config.GoogleClientID != "" {
 		googleValidator, err := social.NewGoogleValidator(ctx, config.GoogleClientID)
 		if err != nil {

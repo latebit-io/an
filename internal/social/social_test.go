@@ -55,7 +55,7 @@ func newSocialHarness(t *testing.T) *socialHarness {
 
 	accountRepository := accounts.NewPostgresAccountRepository(pool)
 	service := NewDefaultSocialService(accountRepository, NewPostgresSocialRepository(pool),
-		tokenizer, 4)
+		tokenizer, utils.NewPostgresTxManager(pool), 4)
 	validator := &fakeValidator{
 		name: "google",
 		identity: &Identity{

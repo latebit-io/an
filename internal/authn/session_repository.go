@@ -2,9 +2,11 @@ package authn
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/latebit-io/an/internal/utils"
 )
@@ -27,6 +29,11 @@ type SessionRepository interface {
 	// Read resolves the exact (tenant, email, client) session — per-client
 	// token lifecycle depends on all three keys.
 	Read(ctx context.Context, tenantID, email, clientID string) (*Session, error)
+	// Rotate swaps the session's refresh jti in one atomic conditional
+	// update; false means the session is gone or currentJTI is no longer
+	// the latest. Concurrent renewals of the same token: exactly one wins.
+	Rotate(ctx context.Context, tenantID, email, clientID, currentJTI, nextJTI string,
+		expires time.Time) (bool, error)
 	Delete(ctx context.Context, tenantID, email, clientID string) error
 	DeleteAll(ctx context.Context, tenantID, email string) error
 	DeleteExpired(ctx context.Context) (int64, error)
@@ -66,10 +73,26 @@ func (r *PostgresSessionRepository) Read(ctx context.Context, tenantID, email,
 		tenantID, email, clientID).
 		Scan(&session.ID, &session.TenantID, &session.Email, &session.ClientID,
 			&session.RefreshJTI, &session.Expires, &session.Created, &session.Modified)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, SessionNotFoundError{Value: email + "/" + clientID}
+	}
 	if err != nil {
 		return nil, err
 	}
 	return &session, nil
+}
+
+func (r *PostgresSessionRepository) Rotate(ctx context.Context, tenantID, email, clientID,
+	currentJTI, nextJTI string, expires time.Time) (bool, error) {
+	querier := utils.QuerierFrom(ctx, r.pool)
+	tag, err := querier.Exec(ctx,
+		`UPDATE sessions SET refresh_jti = $5, expires = $6, modified = now()
+		 WHERE tenant_id = $1 AND email = $2 AND client_id = $3 AND refresh_jti = $4`,
+		tenantID, email, clientID, currentJTI, nextJTI, expires)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() == 1, nil
 }
 
 func (r *PostgresSessionRepository) Delete(ctx context.Context, tenantID, email, clientID string) error {

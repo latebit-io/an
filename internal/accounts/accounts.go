@@ -182,19 +182,20 @@ func (s *DefaultAccountService) Reset(ctx context.Context, tenantID, email, toke
 	if err != nil {
 		return err
 	}
-	err = s.txManager.WithTransaction(ctx, func(ctx context.Context) error {
+	// One transaction: a reset that changed the password but left live
+	// sessions (or the lockout) behind would be worse than failing whole.
+	return s.txManager.WithTransaction(ctx, func(ctx context.Context) error {
 		if err := s.accounts.UpdatePasswordHash(ctx, tenantID, email, passwordHash); err != nil {
 			return err
 		}
-		return s.resets.Delete(ctx, tenantID, email)
+		if err := s.resets.Delete(ctx, tenantID, email); err != nil {
+			return err
+		}
+		if err := s.sessions.DeleteAll(ctx, tenantID, email); err != nil {
+			return err
+		}
+		return s.lockouts.Clear(ctx, tenantID, email)
 	})
-	if err != nil {
-		return err
-	}
-	if err := s.sessions.DeleteAll(ctx, tenantID, email); err != nil {
-		return err
-	}
-	return s.lockouts.Clear(ctx, tenantID, email)
 }
 
 func (s *DefaultAccountService) UpdatePassword(ctx context.Context, tenantID, email,
@@ -224,10 +225,12 @@ func (s *DefaultAccountService) Delete(ctx context.Context, tenantID, email stri
 	if _, err := s.readLive(ctx, tenantID, email); err != nil {
 		return err
 	}
-	if err := s.accounts.SoftDelete(ctx, tenantID, email); err != nil {
-		return err
-	}
-	return s.sessions.DeleteAll(ctx, tenantID, email)
+	return s.txManager.WithTransaction(ctx, func(ctx context.Context) error {
+		if err := s.accounts.SoftDelete(ctx, tenantID, email); err != nil {
+			return err
+		}
+		return s.sessions.DeleteAll(ctx, tenantID, email)
+	})
 }
 
 // readLive returns the account unless it is deleted (deleted reads as not

@@ -5,7 +5,6 @@ import (
 	"errors"
 	"time"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/latebit-io/an/internal/accounts"
 	"github.com/latebit-io/an/internal/tokens"
 	"github.com/latebit-io/an/internal/utils"
@@ -108,6 +107,11 @@ func (s *DefaultAuthenticationService) Validate(ctx context.Context, tenantID,
 	if _, err := s.readSession(ctx, tenantID, claims.Subject, claims.ClientID); err != nil {
 		return nil, err
 	}
+	// Fail closed on disabled or deleted accounts instead of letting their
+	// acknowledged tokens ride out the expiry.
+	if _, err := s.liveAccount(ctx, tenantID, claims.Subject); err != nil {
+		return nil, err
+	}
 	return claims, nil
 }
 
@@ -120,15 +124,6 @@ func (s *DefaultAuthenticationService) Renew(ctx context.Context, tenantID,
 	if claims.TenantID != tenantID {
 		return nil, TokenTenantMismatchError{}
 	}
-	session, err := s.readSession(ctx, tenantID, claims.Subject, claims.ClientID)
-	if err != nil {
-		return nil, err
-	}
-	// Only the latest refresh token renews: a rotated-away or revoked
-	// token is dead even though its signature still verifies.
-	if !utils.SafeCompare(claims.ID, session.RefreshJTI) {
-		return nil, TokenNotAcknowledgedError{}
-	}
 	if _, err := s.liveAccount(ctx, tenantID, claims.Subject); err != nil {
 		return nil, err
 	}
@@ -136,16 +131,17 @@ func (s *DefaultAuthenticationService) Renew(ctx context.Context, tenantID,
 	if err != nil {
 		return nil, err
 	}
-	// Rotate the session to the new refresh token; no re-ack needed.
-	err = s.sessions.Upsert(ctx, Session{
-		TenantID:   tenantID,
-		Email:      claims.Subject,
-		ClientID:   claims.ClientID,
-		RefreshJTI: refreshClaims.ID,
-		Expires:    refreshClaims.ExpiresAt.Time,
-	})
+	// Only the latest refresh token renews. The rotation is a single
+	// conditional update keyed on the presented jti, so two concurrent
+	// renewals of the same token race for exactly one winner — a
+	// rotated-away, revoked or never-acknowledged token loses.
+	rotated, err := s.sessions.Rotate(ctx, tenantID, claims.Subject, claims.ClientID,
+		claims.ID, refreshClaims.ID, refreshClaims.ExpiresAt.Time)
 	if err != nil {
 		return nil, err
+	}
+	if !rotated {
+		return nil, TokenNotAcknowledgedError{}
 	}
 	return authenticated, nil
 }
@@ -234,7 +230,8 @@ func (s *DefaultAuthenticationService) countFailure(ctx context.Context, tenantI
 func (s *DefaultAuthenticationService) readSession(ctx context.Context, tenantID, email,
 	clientID string) (*Session, error) {
 	session, err := s.sessions.Read(ctx, tenantID, email, clientID)
-	if errors.Is(err, pgx.ErrNoRows) {
+	var notFound SessionNotFoundError
+	if errors.As(err, &notFound) {
 		return nil, TokenNotAcknowledgedError{}
 	}
 	if err != nil {

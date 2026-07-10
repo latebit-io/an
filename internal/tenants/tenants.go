@@ -3,21 +3,12 @@ package tenants
 import (
 	"context"
 	"errors"
-	"fmt"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/latebit-io/an/internal/utils"
 )
-
-type TenantNotFoundError struct {
-	Value string `json:"value"`
-}
-
-func (e TenantNotFoundError) Error() string {
-	return fmt.Sprintf("tenant not found: %s", e.Value)
-}
 
 type Tenant struct {
 	ID       string    `json:"id"`

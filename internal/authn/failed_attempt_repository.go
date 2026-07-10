@@ -61,14 +61,15 @@ func (r *PostgresFailedAttemptRepository) IncrementAndLock(ctx context.Context, 
 	var lockedUntil *time.Time
 	err := querier.QueryRow(ctx,
 		`INSERT INTO failed_attempts (tenant_id, email, count, locked_until, modified)
-		 VALUES ($1, $2, 1, CASE WHEN 1 >= $3 THEN now() + $4 END, now())
+		 VALUES ($1, $2, 1, CASE WHEN 1 >= $3 THEN now() + make_interval(secs => $4) END, now())
 		 ON CONFLICT (tenant_id, email) DO UPDATE SET
 		     count = failed_attempts.count + 1,
 		     locked_until = CASE WHEN failed_attempts.count + 1 >= $3
-		                         THEN now() + $4 ELSE failed_attempts.locked_until END,
+		                         THEN now() + make_interval(secs => $4)
+		                         ELSE failed_attempts.locked_until END,
 		     modified = now()
 		 RETURNING locked_until`,
-		tenantID, email, maxAttempts, lockFor).Scan(&lockedUntil)
+		tenantID, email, maxAttempts, lockFor.Seconds()).Scan(&lockedUntil)
 	if err != nil {
 		return nil, err
 	}
@@ -86,7 +87,8 @@ func (r *PostgresFailedAttemptRepository) DeleteStale(ctx context.Context,
 	olderThan time.Duration) (int64, error) {
 	querier := utils.QuerierFrom(ctx, r.pool)
 	tag, err := querier.Exec(ctx,
-		"DELETE FROM failed_attempts WHERE modified < now() - $1", olderThan)
+		"DELETE FROM failed_attempts WHERE modified < now() - make_interval(secs => $1)",
+		olderThan.Seconds())
 	if err != nil {
 		return 0, err
 	}

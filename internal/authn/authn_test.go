@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -298,6 +299,62 @@ func TestIncrementAndLockIsAtomic(t *testing.T) {
 	assert.Equal(t, workers, attempt.Count, "no lost updates")
 	require.NotNil(t, attempt.LockedUntil)
 	assert.True(t, attempt.LockedUntil.After(time.Now()))
+}
+
+// TestRenewConcurrentSingleWinner hammers Renew with the same refresh
+// token: the atomic rotation must let exactly one renewal through.
+func TestRenewConcurrentSingleWinner(t *testing.T) {
+	ctx := context.Background()
+	h := newHarness(t, 5, time.Minute)
+	h.registerVerified(t, "default", "user@example.com", "password-1")
+	authenticated := h.logonAndAck(t, "default", "user@example.com", "password-1", "client-1")
+
+	const workers = 10
+	var wg sync.WaitGroup
+	var wins atomic.Int32
+	for range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := h.service.Renew(ctx, "default", authenticated.RefreshToken); err == nil {
+				wins.Add(1)
+			}
+		}()
+	}
+	wg.Wait()
+
+	assert.Equal(t, int32(1), wins.Load(), "exactly one concurrent renewal wins")
+}
+
+func TestValidateRejectsDeletedAccount(t *testing.T) {
+	ctx := context.Background()
+	h := newHarness(t, 5, time.Minute)
+	h.registerVerified(t, "default", "user@example.com", "password-1")
+	authenticated := h.logonAndAck(t, "default", "user@example.com", "password-1", "client-1")
+
+	_, err := h.service.Validate(ctx, "default", authenticated.AccessToken)
+	require.NoError(t, err)
+
+	require.NoError(t, h.accounts.Delete(ctx, "default", "user@example.com"))
+
+	_, err = h.service.Validate(ctx, "default", authenticated.AccessToken)
+	assert.Error(t, err, "a deleted account's tokens stop validating immediately")
+}
+
+func TestFailedAttemptsDeleteStale(t *testing.T) {
+	ctx := context.Background()
+	h := newHarness(t, 5, time.Minute)
+
+	_, err := h.attempts.IncrementAndLock(ctx, "default", "user@example.com", 5, time.Hour)
+	require.NoError(t, err)
+
+	deleted, err := h.attempts.DeleteStale(ctx, time.Hour)
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), deleted, "fresh rows survive")
+
+	deleted, err = h.attempts.DeleteStale(ctx, -time.Minute)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), deleted, "stale rows are swept")
 }
 
 func TestSessionExpiryCleanup(t *testing.T) {

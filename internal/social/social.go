@@ -35,16 +35,18 @@ type DefaultSocialService struct {
 	accounts     accounts.AccountRepository
 	links        SocialRepository
 	tokenizer    tokens.Tokenizer
+	txManager    utils.TxManager
 	passwordCost int
 }
 
 func NewDefaultSocialService(accountRepository accounts.AccountRepository, links SocialRepository,
-	tokenizer tokens.Tokenizer, passwordCost int) SocialService {
+	tokenizer tokens.Tokenizer, txManager utils.TxManager, passwordCost int) SocialService {
 	return &DefaultSocialService{
 		validators:   make(map[string]Validator),
 		accounts:     accountRepository,
 		links:        links,
 		tokenizer:    tokenizer,
+		txManager:    txManager,
 		passwordCost: passwordCost,
 	}
 }
@@ -73,22 +75,27 @@ func (s *DefaultSocialService) Authenticate(ctx context.Context, tenantID, provi
 		return nil, EmailNotVerifiedError{Value: identity.Email}
 	}
 
-	account, err := s.findOrCreate(ctx, tenantID, identity.Email)
-	if err != nil {
-		return nil, err
-	}
-	if account.Deleted {
-		return nil, authn.AuthenticationError{}
-	}
-	if !account.Enabled {
-		return nil, accounts.AccountDisabledError{Value: identity.Email}
-	}
-	if !account.Verified {
-		if err := s.accounts.SetVerified(ctx, tenantID, identity.Email); err != nil {
-			return nil, err
+	// One transaction: a failed Link must not leave behind a freshly
+	// created (or freshly verified) account without its social identity.
+	err = s.txManager.WithTransaction(ctx, func(ctx context.Context) error {
+		account, err := s.findOrCreate(ctx, tenantID, identity.Email)
+		if err != nil {
+			return err
 		}
-	}
-	if err := s.links.Link(ctx, account.ID, identity.Provider, identity.Subject); err != nil {
+		if account.Deleted {
+			return authn.AuthenticationError{}
+		}
+		if !account.Enabled {
+			return accounts.AccountDisabledError{Value: identity.Email}
+		}
+		if !account.Verified {
+			if err := s.accounts.SetVerified(ctx, tenantID, identity.Email); err != nil {
+				return err
+			}
+		}
+		return s.links.Link(ctx, account.ID, identity.Provider, identity.Subject)
+	})
+	if err != nil {
 		return nil, err
 	}
 
