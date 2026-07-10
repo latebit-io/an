@@ -4,7 +4,7 @@ import "fmt"
 
 // TenantNotFoundError signals the tenant does not exist.
 type TenantNotFoundError struct {
-	Value string `json:"value"`
+	Value string
 }
 
 func (e TenantNotFoundError) Error() string {
