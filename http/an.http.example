@@ -1,0 +1,138 @@
+# an — manual request examples
+# Copy to an.http, fill in the placeholders, use a REST client
+# (VS Code REST Client, IntelliJ) to execute.
+#
+# @API_KEY = your bootstrap or tenant api key
+# @TENANT = default
+
+### Health
+GET http://localhost:8080/health
+
+### JWKS (public signing keys, no api key needed)
+GET http://localhost:8080/.well-known/jwks.json
+
+### Register an account (returns the verification token — deliver it yourself)
+POST http://localhost:8080/api/accounts
+Content-Type: application/json
+X-AN-API-KEY: {{API_KEY}}
+
+{"tenantId": "{{TENANT}}", "email": "user@example.com", "password": "password-1"}
+
+### Verify
+POST http://localhost:8080/api/accounts/verify
+Content-Type: application/json
+X-AN-API-KEY: {{API_KEY}}
+
+{"tenantId": "{{TENANT}}", "email": "user@example.com", "verificationToken": "<from register>"}
+
+### Resend verification (regenerates the token)
+POST http://localhost:8080/api/accounts/verify/resend
+Content-Type: application/json
+X-AN-API-KEY: {{API_KEY}}
+
+{"tenantId": "{{TENANT}}", "email": "user@example.com"}
+
+### Password logon
+POST http://localhost:8080/api/authenticate
+Content-Type: application/json
+X-AN-API-KEY: {{API_KEY}}
+
+{"tenantId": "{{TENANT}}", "email": "user@example.com", "clientId": "phone", "password": "password-1"}
+
+### Acknowledge the token pair (required before validate/renew)
+POST http://localhost:8080/api/authenticate/ack
+Content-Type: application/json
+X-AN-API-KEY: {{API_KEY}}
+
+{"tenantId": "{{TENANT}}", "accessToken": "<access>", "refreshToken": "<refresh>"}
+
+### Validate an access token (signature + expiry + acknowledged session)
+POST http://localhost:8080/api/authenticate/validate
+Content-Type: application/json
+X-AN-API-KEY: {{API_KEY}}
+
+{"tenantId": "{{TENANT}}", "accessToken": "<access>"}
+
+### Renew (rotates the refresh token)
+POST http://localhost:8080/api/authenticate/renew
+Content-Type: application/json
+X-AN-API-KEY: {{API_KEY}}
+
+{"tenantId": "{{TENANT}}", "refreshToken": "<refresh>"}
+
+### Revoke one client (empty clientId revokes all)
+PUT http://localhost:8080/api/authenticate/revoke
+Content-Type: application/json
+X-AN-API-KEY: {{API_KEY}}
+
+{"tenantId": "{{TENANT}}", "email": "user@example.com", "clientId": "phone"}
+
+### Request a magic logon code (returns the code — deliver it yourself)
+POST http://localhost:8080/api/authenticate/code/request
+Content-Type: application/json
+X-AN-API-KEY: {{API_KEY}}
+
+{"tenantId": "{{TENANT}}", "email": "user@example.com"}
+
+### Logon with the code
+POST http://localhost:8080/api/authenticate/code
+Content-Type: application/json
+X-AN-API-KEY: {{API_KEY}}
+
+{"tenantId": "{{TENANT}}", "email": "user@example.com", "clientId": "phone", "code": "123456"}
+
+### Google social logon
+POST http://localhost:8080/api/authenticate/social
+Content-Type: application/json
+X-AN-API-KEY: {{API_KEY}}
+
+{"tenantId": "{{TENANT}}", "provider": "google", "idToken": "<google id token>", "clientId": "phone"}
+
+### Forgot password (returns the reset token — deliver it yourself)
+POST http://localhost:8080/api/accounts/forgot
+Content-Type: application/json
+X-AN-API-KEY: {{API_KEY}}
+
+{"tenantId": "{{TENANT}}", "email": "user@example.com"}
+
+### Reset password
+POST http://localhost:8080/api/accounts/reset
+Content-Type: application/json
+X-AN-API-KEY: {{API_KEY}}
+
+{"tenantId": "{{TENANT}}", "email": "user@example.com", "resetToken": "<from forgot>", "newPassword": "password-2"}
+
+### Change password
+PUT http://localhost:8080/api/accounts/password
+Content-Type: application/json
+X-AN-API-KEY: {{API_KEY}}
+
+{"tenantId": "{{TENANT}}", "email": "user@example.com", "currentPassword": "password-1", "newPassword": "password-2"}
+
+### Delete account (soft)
+PUT http://localhost:8080/api/accounts/delete
+Content-Type: application/json
+X-AN-API-KEY: {{API_KEY}}
+
+{"tenantId": "{{TENANT}}", "email": "user@example.com"}
+
+### Create a tenant-scoped api key (bootstrap key only; secret shown once)
+POST http://localhost:8080/api/apikeys
+Content-Type: application/json
+X-AN-API-KEY: {{API_KEY}}
+
+{"tenantId": "{{TENANT}}", "name": "my-service"}
+
+### List api keys (bootstrap key only)
+POST http://localhost:8080/api/apikeys/list
+Content-Type: application/json
+X-AN-API-KEY: {{API_KEY}}
+
+{"tenantId": "{{TENANT}}"}
+
+### Revoke an api key (bootstrap key only)
+PUT http://localhost:8080/api/apikeys/delete
+Content-Type: application/json
+X-AN-API-KEY: {{API_KEY}}
+
+{"tenantId": "{{TENANT}}", "id": "<key id>"}
