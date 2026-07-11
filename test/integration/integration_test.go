@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rsa"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"math/big"
 	"net/http"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
+	an "github.com/latebit-io/an-client"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -20,7 +22,7 @@ import (
 var (
 	baseURI = "http://localhost:8080"
 	apiKey  string
-	client  *Client
+	client  *an.Client
 )
 
 func TestMain(m *testing.M) {
@@ -28,7 +30,7 @@ func TestMain(m *testing.M) {
 		baseURI = uri
 	}
 	apiKey = os.Getenv("API_KEY")
-	client = NewClient(baseURI, apiKey)
+	client = an.NewClient(baseURI, apiKey, nil)
 
 	// wait for the service to be reachable
 	ready := false
@@ -60,54 +62,54 @@ func newTenant() string {
 // registerVerified provisions a verified account ready to log on.
 func registerVerified(t *testing.T, tenant, email, password string) {
 	ctx := context.Background()
-	registered, err := client.Register(ctx, tenant, email, password)
+	registered, err := client.Accounts.Register(ctx, tenant, email, password)
 	require.NoError(t, err)
 	require.NotEmpty(t, registered.VerificationToken)
-	require.NoError(t, client.Verify(ctx, tenant, email, registered.VerificationToken))
+	require.NoError(t, client.Accounts.Verify(ctx, tenant, email, registered.VerificationToken))
 }
 
 func TestFullPasswordLifecycle(t *testing.T) {
 	ctx := context.Background()
 	tenant := newTenant()
 
-	registered, err := client.Register(ctx, tenant, "user@example.com", "password-1")
+	registered, err := client.Accounts.Register(ctx, tenant, "user@example.com", "password-1")
 	require.NoError(t, err)
 	assert.False(t, registered.Verified)
 
 	// logging on before verification is forbidden
-	_, err = client.Authenticate(ctx, tenant, "user@example.com", "phone", "password-1")
+	_, err = client.Authenticate.Password(ctx, tenant, "user@example.com", "phone", "password-1")
 	problem := requireProblem(t, err)
 	assert.Equal(t, http.StatusForbidden, problem.Status)
 
-	require.NoError(t, client.Verify(ctx, tenant, "user@example.com", registered.VerificationToken))
+	require.NoError(t, client.Accounts.Verify(ctx, tenant, "user@example.com", registered.VerificationToken))
 
-	tokens, err := client.Authenticate(ctx, tenant, "user@example.com", "phone", "password-1")
+	tokens, err := client.Authenticate.Password(ctx, tenant, "user@example.com", "phone", "password-1")
 	require.NoError(t, err)
 
 	// tokens are inert until acknowledged
-	_, err = client.Validate(ctx, tenant, tokens.AccessToken)
+	_, err = client.Authenticate.Validate(ctx, tenant, tokens.AccessToken)
 	problem = requireProblem(t, err)
 	assert.Equal(t, http.StatusUnauthorized, problem.Status)
 
-	require.NoError(t, client.Acknowledge(ctx, tenant, *tokens))
-	claims, err := client.Validate(ctx, tenant, tokens.AccessToken)
+	require.NoError(t, client.Authenticate.Acknowledge(ctx, tenant, *tokens))
+	claims, err := client.Authenticate.Validate(ctx, tenant, tokens.AccessToken)
 	require.NoError(t, err)
 	assert.Equal(t, "user@example.com", claims.Subject)
 	assert.Equal(t, "phone", claims.ClientID)
 	assert.Equal(t, tenant, claims.TenantID)
 
-	renewed, err := client.Renew(ctx, tenant, tokens.RefreshToken)
+	renewed, err := client.Authenticate.Renew(ctx, tenant, tokens.RefreshToken)
 	require.NoError(t, err)
 
-	_, err = client.Renew(ctx, tenant, tokens.RefreshToken)
+	_, err = client.Authenticate.Renew(ctx, tenant, tokens.RefreshToken)
 	problem = requireProblem(t, err)
 	assert.Equal(t, http.StatusUnauthorized, problem.Status, "rotated-away refresh token is dead")
 
-	_, err = client.Validate(ctx, tenant, renewed.AccessToken)
+	_, err = client.Authenticate.Validate(ctx, tenant, renewed.AccessToken)
 	require.NoError(t, err)
 
-	require.NoError(t, client.Revoke(ctx, tenant, "user@example.com", "phone"))
-	_, err = client.Validate(ctx, tenant, renewed.AccessToken)
+	require.NoError(t, client.Authenticate.Revoke(ctx, tenant, "user@example.com", "phone"))
+	_, err = client.Authenticate.Validate(ctx, tenant, renewed.AccessToken)
 	problem = requireProblem(t, err)
 	assert.Equal(t, http.StatusUnauthorized, problem.Status, "revoked session no longer validates")
 }
@@ -117,18 +119,18 @@ func TestRevokePerClient(t *testing.T) {
 	tenant := newTenant()
 	registerVerified(t, tenant, "user@example.com", "password-1")
 
-	phone, err := client.Authenticate(ctx, tenant, "user@example.com", "phone", "password-1")
+	phone, err := client.Authenticate.Password(ctx, tenant, "user@example.com", "phone", "password-1")
 	require.NoError(t, err)
-	require.NoError(t, client.Acknowledge(ctx, tenant, *phone))
-	laptop, err := client.Authenticate(ctx, tenant, "user@example.com", "laptop", "password-1")
+	require.NoError(t, client.Authenticate.Acknowledge(ctx, tenant, *phone))
+	laptop, err := client.Authenticate.Password(ctx, tenant, "user@example.com", "laptop", "password-1")
 	require.NoError(t, err)
-	require.NoError(t, client.Acknowledge(ctx, tenant, *laptop))
+	require.NoError(t, client.Authenticate.Acknowledge(ctx, tenant, *laptop))
 
-	require.NoError(t, client.Revoke(ctx, tenant, "user@example.com", "phone"))
+	require.NoError(t, client.Authenticate.Revoke(ctx, tenant, "user@example.com", "phone"))
 
-	_, err = client.Validate(ctx, tenant, phone.AccessToken)
+	_, err = client.Authenticate.Validate(ctx, tenant, phone.AccessToken)
 	require.Error(t, err)
-	_, err = client.Validate(ctx, tenant, laptop.AccessToken)
+	_, err = client.Authenticate.Validate(ctx, tenant, laptop.AccessToken)
 	require.NoError(t, err, "the other client stays signed in")
 }
 
@@ -137,23 +139,23 @@ func TestForgotAndReset(t *testing.T) {
 	tenant := newTenant()
 	registerVerified(t, tenant, "user@example.com", "password-1")
 
-	tokens, err := client.Authenticate(ctx, tenant, "user@example.com", "phone", "password-1")
+	tokens, err := client.Authenticate.Password(ctx, tenant, "user@example.com", "phone", "password-1")
 	require.NoError(t, err)
-	require.NoError(t, client.Acknowledge(ctx, tenant, *tokens))
+	require.NoError(t, client.Authenticate.Acknowledge(ctx, tenant, *tokens))
 
-	reset, err := client.Forgot(ctx, tenant, "user@example.com")
+	reset, err := client.Accounts.Forgot(ctx, tenant, "user@example.com")
 	require.NoError(t, err)
 	require.NotEmpty(t, reset.Token)
 
-	require.NoError(t, client.Reset(ctx, tenant, "user@example.com", reset.Token, "password-2"))
+	require.NoError(t, client.Accounts.Reset(ctx, tenant, "user@example.com", reset.Token, "password-2"))
 
-	_, err = client.Authenticate(ctx, tenant, "user@example.com", "phone", "password-1")
+	_, err = client.Authenticate.Password(ctx, tenant, "user@example.com", "phone", "password-1")
 	require.Error(t, err, "old password is dead")
 
-	_, err = client.Validate(ctx, tenant, tokens.AccessToken)
+	_, err = client.Authenticate.Validate(ctx, tenant, tokens.AccessToken)
 	require.Error(t, err, "reset revokes existing sessions")
 
-	_, err = client.Authenticate(ctx, tenant, "user@example.com", "phone", "password-2")
+	_, err = client.Authenticate.Password(ctx, tenant, "user@example.com", "phone", "password-2")
 	require.NoError(t, err)
 }
 
@@ -162,14 +164,14 @@ func TestLockout(t *testing.T) {
 	tenant := newTenant()
 	registerVerified(t, tenant, "user@example.com", "password-1")
 
-	var problem *Error
+	var problem *an.Error
 	for range 5 {
-		_, err := client.Authenticate(ctx, tenant, "user@example.com", "phone", "wrong")
+		_, err := client.Authenticate.Password(ctx, tenant, "user@example.com", "phone", "wrong")
 		problem = requireProblem(t, err)
 	}
 	assert.Equal(t, http.StatusLocked, problem.Status, "fifth failure locks")
 
-	_, err := client.Authenticate(ctx, tenant, "user@example.com", "phone", "password-1")
+	_, err := client.Authenticate.Password(ctx, tenant, "user@example.com", "phone", "password-1")
 	problem = requireProblem(t, err)
 	assert.Equal(t, http.StatusLocked, problem.Status, "even the right password is locked out")
 }
@@ -179,26 +181,26 @@ func TestMagicCodeLifecycle(t *testing.T) {
 	tenant := newTenant()
 
 	// register only — the code logon itself proves mailbox ownership
-	_, err := client.Register(ctx, tenant, "user@example.com", "password-1")
+	_, err := client.Accounts.Register(ctx, tenant, "user@example.com", "password-1")
 	require.NoError(t, err)
 
-	issued, err := client.RequestCode(ctx, tenant, "user@example.com")
+	issued, err := client.Authenticate.RequestCode(ctx, tenant, "user@example.com")
 	require.NoError(t, err)
 	require.Len(t, issued.Code, 6)
 
-	tokens, err := client.CodeLogon(ctx, tenant, "user@example.com", "phone", issued.Code)
+	tokens, err := client.Authenticate.Code(ctx, tenant, "user@example.com", "phone", issued.Code)
 	require.NoError(t, err)
 
-	_, err = client.CodeLogon(ctx, tenant, "user@example.com", "phone", issued.Code)
+	_, err = client.Authenticate.Code(ctx, tenant, "user@example.com", "phone", issued.Code)
 	require.Error(t, err, "a code is single use")
 
-	require.NoError(t, client.Acknowledge(ctx, tenant, *tokens))
-	claims, err := client.Validate(ctx, tenant, tokens.AccessToken)
+	require.NoError(t, client.Authenticate.Acknowledge(ctx, tenant, *tokens))
+	claims, err := client.Authenticate.Validate(ctx, tenant, tokens.AccessToken)
 	require.NoError(t, err)
 	assert.Equal(t, "user@example.com", claims.Subject)
 
 	// the code logon verified the account, so passwords work now
-	_, err = client.Authenticate(ctx, tenant, "user@example.com", "phone", "password-1")
+	_, err = client.Authenticate.Password(ctx, tenant, "user@example.com", "phone", "password-1")
 	require.NoError(t, err)
 }
 
@@ -209,7 +211,7 @@ func TestJWKSVerifiesTokenLocally(t *testing.T) {
 	tenant := newTenant()
 	registerVerified(t, tenant, "user@example.com", "password-1")
 
-	tokens, err := client.Authenticate(ctx, tenant, "user@example.com", "phone", "password-1")
+	tokens, err := client.Authenticate.Password(ctx, tenant, "user@example.com", "phone", "password-1")
 	require.NoError(t, err)
 
 	keySet, err := client.JWKS(ctx)
@@ -249,30 +251,30 @@ func TestApiKeyTenantScoping(t *testing.T) {
 	tenantB := newTenant()
 
 	// no key → 401
-	_, err := NewClient(baseURI, "").Register(ctx, tenantA, "user@example.com", "password-1")
+	_, err := an.NewClient(baseURI, "", nil).Accounts.Register(ctx, tenantA, "user@example.com", "password-1")
 	problem := requireProblem(t, err)
 	assert.Equal(t, http.StatusUnauthorized, problem.Status)
 
 	// bootstrap mints a tenant-scoped key
-	created, err := client.CreateApiKey(ctx, tenantA, "integration")
+	created, err := client.APIKeys.Create(ctx, tenantA, "integration")
 	require.NoError(t, err)
 	require.NotEmpty(t, created.Key)
-	tenantClient := client.WithKey(created.Key)
+	tenantClient := an.NewClient(baseURI, created.Key, nil)
 
 	// a tenant key cannot escape its tenant: the requested tenantB is
 	// overridden by the key's tenantA
-	registered, err := tenantClient.Register(ctx, tenantB, "scoped@example.com", "password-1")
+	registered, err := tenantClient.Accounts.Register(ctx, tenantB, "scoped@example.com", "password-1")
 	require.NoError(t, err)
 	assert.Equal(t, tenantA, registered.TenantID)
 
 	// a tenant key cannot manage keys
-	_, err = tenantClient.CreateApiKey(ctx, tenantA, "escalation")
+	_, err = tenantClient.APIKeys.Create(ctx, tenantA, "escalation")
 	problem = requireProblem(t, err)
 	assert.Equal(t, http.StatusForbidden, problem.Status)
 
 	// revoked key stops working
-	require.NoError(t, client.DeleteApiKey(ctx, tenantA, created.ID))
-	_, err = tenantClient.Register(ctx, tenantA, "second@example.com", "password-1")
+	require.NoError(t, client.APIKeys.Revoke(ctx, tenantA, created.ID))
+	_, err = tenantClient.Accounts.Register(ctx, tenantA, "second@example.com", "password-1")
 	problem = requireProblem(t, err)
 	assert.Equal(t, http.StatusUnauthorized, problem.Status)
 }
@@ -281,17 +283,17 @@ func TestProblemDetailsShape(t *testing.T) {
 	ctx := context.Background()
 	tenant := newTenant()
 
-	_, err := client.Forgot(ctx, tenant, "nobody@example.com")
+	_, err := client.Accounts.Forgot(ctx, tenant, "nobody@example.com")
 	problem := requireProblem(t, err)
 	assert.Equal(t, "https://latebit.io/an/errors/", problem.Type)
 	assert.Equal(t, http.StatusNotFound, problem.Status)
 	assert.NotEmpty(t, problem.Detail)
 }
 
-func requireProblem(t *testing.T, err error) *Error {
+func requireProblem(t *testing.T, err error) *an.Error {
 	t.Helper()
 	require.Error(t, err)
-	problem, ok := err.(*Error)
-	require.True(t, ok, "expected problem details, got: %v", err)
+	var problem *an.Error
+	require.True(t, errors.As(err, &problem), "expected problem details, got: %v", err)
 	return problem
 }
