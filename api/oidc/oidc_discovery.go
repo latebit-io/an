@@ -34,6 +34,11 @@ var (
 	// supportedGrantTypes is what /token actually accepts, taken from the
 	// same statement the client enforces.
 	supportedGrantTypes = internaloidc.SupportedGrantTypes
+
+	// supportedAuthMethods is how a client may authenticate at /token.
+	// Both are verified; "none" is not offered, because every client here
+	// is confidential and a request without a secret is refused.
+	supportedAuthMethods = []oidc.AuthMethod{oidc.AuthMethodBasic, oidc.AuthMethodPost}
 )
 
 type DiscoveryHandler struct {
@@ -62,6 +67,7 @@ func (h DiscoveryHandler) Discovery(c *echo.Context) error {
 	// The device flow has no backing storage here, so the endpoint the
 	// library publishes answers nothing useful.
 	document.DeviceAuthorizationEndpoint = ""
+	document.TokenEndpointAuthMethodsSupported = supportedAuthMethods
 
 	return c.JSON(http.StatusOK, document)
 }

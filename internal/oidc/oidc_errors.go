@@ -1,6 +1,55 @@
 package oidc
 
-import "fmt"
+import (
+	"errors"
+	"fmt"
+
+	"github.com/jackc/pgx/v5/pgconn"
+)
+
+// Postgres constraint codes mapped to typed errors, as every other
+// repository here does.
+const (
+	pgUniqueViolation     = "23505"
+	pgForeignKeyViolation = "23503"
+)
+
+// DuplicateError is a unique constraint violation: a code, token hash or
+// session cookie that already exists.
+type DuplicateError struct {
+	Value string
+}
+
+func (e DuplicateError) Error() string {
+	return fmt.Sprintf("already exists: %s", e.Value)
+}
+
+// ReferenceError is a foreign key violation: a row pointing at an account
+// or grant that is not there.
+type ReferenceError struct {
+	Value string
+}
+
+func (e ReferenceError) Error() string {
+	return fmt.Sprintf("referenced row does not exist: %s", e.Value)
+}
+
+// constraintError maps a postgres constraint violation onto a typed error
+// so callers never see a raw driver error, and problem details never carry
+// its text. Anything else passes through untouched.
+func constraintError(err error, what string) error {
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) {
+		return err
+	}
+	switch pgErr.Code {
+	case pgUniqueViolation:
+		return DuplicateError{Value: what}
+	case pgForeignKeyViolation:
+		return ReferenceError{Value: what}
+	}
+	return err
+}
 
 // AuthRequestNotFoundError is returned for an unknown, already exchanged or
 // expired authorization request. The token endpoint deletes the request on

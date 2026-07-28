@@ -54,7 +54,7 @@ func (r *PostgresAuthRequestRepository) Create(ctx context.Context,
 		nullableTime(request.AuthTime), request.Complete, request.Expires).
 		Scan(&request.Created, &request.Modified)
 	if err != nil {
-		return nil, err
+		return nil, constraintError(err, "auth request")
 	}
 	return &request, nil
 }
@@ -149,7 +149,7 @@ func (r *PostgresAuthRequestRepository) update(ctx context.Context, sql, tenantI
 	querier := utils.QuerierFrom(ctx, r.pool)
 	tag, err := querier.Exec(ctx, sql, append([]any{tenantID, id}, args...)...)
 	if err != nil {
-		return err
+		return constraintError(err, "auth request")
 	}
 	if tag.RowsAffected() == 0 {
 		return AuthRequestNotFoundError{Value: id}

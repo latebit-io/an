@@ -51,7 +51,7 @@ func (r *PostgresBrowserSessionRepository) Create(ctx context.Context,
 		session.ID, utils.Sha256Hex(plaintext), session.TenantID, session.AccountID,
 		session.AuthTime, session.Expires).Scan(&session.Created)
 	if err != nil {
-		return nil, "", err
+		return nil, "", constraintError(err, "browser session")
 	}
 	return &session, plaintext, nil
 }

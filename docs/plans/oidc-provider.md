@@ -60,7 +60,11 @@ Minting the `id_token` is a new method alongside the current ones, not a change 
 - Issuer: `https://<host>/t/<tenantId>`
 - Discovery: `/t/<tenantId>/.well-known/openid-configuration`
 - JWKS: `/t/<tenantId>/.well-known/jwks.json`, serving the same global key set. Keys are not per tenant; only the URL is. The existing `/.well-known/jwks.json` stays and serves the same document.
-- `/t/<tenantId>/authorize`, `/t/<tenantId>/token`, `/t/<tenantId>/userinfo`, `/t/<tenantId>/logout`.
+- `/t/<tenantId>/authorize`, `/t/<tenantId>/oauth/token`,
+  `/t/<tenantId>/userinfo`, `/t/<tenantId>/end_session` (with `/logout` as a
+  human-facing alias), `/t/<tenantId>/oauth/introspect`,
+  `/t/<tenantId>/revoke`. The paths are the library's; discovery publishes
+  them and the api key exemption list is checked against it by test.
 
 `DOMAIN` gains a companion `PUBLIC_BASE_URL` used to build absolute URLs in discovery and in redirects. `ISSUER` keeps its current meaning for the api-key token path.
 
@@ -68,7 +72,7 @@ Minting the `id_token` is a new method alongside the current ones, not a change 
 
 The existing `sessions` table is one row per `(tenant_id, email, client_id)` and `Upsert` overwrites on conflict, so a second sign-in evicts the first. That is tolerable for server-to-server callers and wrong for an SSO issuer, where the same person is legitimately signed in from a phone and a laptop at once.
 
-A new `oidc_sessions` table holds one row per issued grant, keyed by its own id, carrying `(tenant_id, account_id, client_id, refresh token hash, expires)`. Many rows per triple are expected.
+Grants live in their own tables rather than in `sessions`: `oidc_refresh_tokens` holds one row per issued grant, `oidc_access_tokens` the opaque access tokens that cascade from it, and `oidc_browser_sessions` the single sign-on cookie. Many rows per (tenant, subject, client) are expected.
 
 The "inert until acknowledged" invariant does not apply here. Tokens returned from `/token` are live on return; there is no acknowledgement step in the code flow. The existing invariant and its regression tests are untouched.
 
@@ -82,7 +86,7 @@ Once that session exists, there must be a way to end it, so **RP-initiated logou
 
 `api/auth.Middleware` currently exempts only `/health` and paths under `/.well-known/`. The OIDC surface is browser and relying-party facing and cannot carry `X-AN-API-KEY`. The exemption list grows to:
 
-`/t/<tenantId>/authorize`, `/token`, `/userinfo`, `/logout`, and the login UI's form post and static assets.
+`/t/<tenantId>/` plus `authorize`, `authorize/callback`, `oauth/token`, `oauth/introspect`, `userinfo`, `revoke`, `end_session`, `keys`, the discovery document, and the login UI's form post. `IsProviderPath` holds the list and a test walks the discovery document to prove nothing advertised is left gated.
 
 `/token` and `/userinfo` authenticate the client (secret or PKCE) instead; `/authorize` authenticates the user. This is a deliberate amendment to the invariant recorded in `CLAUDE.md`, which is updated in the same change rather than left contradicting the code.
 
@@ -103,7 +107,7 @@ A minimal conformant issuer. Deliberately not all of OIDC.
 | Authorization code store | Single-use, short TTL, bound to client, redirect URI, PKCE challenge, nonce, and subject |
 | `/token` | Code exchange with client authentication, plus the `refresh_token` grant |
 | `/userinfo` | Small, given the claims are already computed. See below |
-| `/logout` | RP-initiated, `end_session_endpoint` in discovery |
+| `/end_session` | RP-initiated, advertised as `end_session_endpoint`; `/logout` is an alias |
 | `id_token` minting | `sub` = account id; `email`, `email_verified`, `groups`, `name`; `aud` = client id |
 | Account `name` | Migration, plus registration and profile update. No source exists today |
 | OIDC client registry | Client id, secret hash, redirect URIs, allowed scopes, first-party flag, per tenant |
@@ -165,7 +169,7 @@ Not free, and the costs are known going in:
 - **A 32-byte `CryptoKey`** in config, for the library's code encryption. New required env var, and losing it invalidates in-flight authorization codes.
 - `SetUserinfoFromScopes` is deprecated with an empty body; `SetUserinfoFromRequest` is the live one.
 
-Contain it as planned: one `internal/oidc` package owns the storage adapter and is the only place that imports `op`, so nothing outside sees the library's types.
+Contain it as planned: `internal/oidc` owns the storage adapter and the domain types, `api/oidc` owns the mount and the login UI. Those two packages are the only importers of `op`; nothing below or beside them sees the library's types, and `an`'s own structs never carry them.
 
 This does not conflict with owning identity. `an` keeps its accounts, its storage, its signing keys, its multi-tenancy, and its existing API. What comes from the library is the specification-shaped part that has been attacked in the wild and where a subtle mistake is a vulnerability rather than a bug.
 

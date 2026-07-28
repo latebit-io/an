@@ -109,7 +109,15 @@ func (h LoginHandler) Submit(c *echo.Context) error {
 
 	csrf, err := c.Request().Cookie(CSRFCookieName)
 	if err != nil || csrf.Value == "" || !utils.SafeCompare(csrf.Value, c.FormValue("csrf")) {
-		return h.render(c, http.StatusBadRequest, tenantID, authRequestID, "", email,
+		// Re-issue the token as well as the form. Rendering the failure
+		// with an empty one would make every retry fail the same check,
+		// which reads to the user as a login that simply does not work.
+		fresh, tokenErr := utils.RandomToken()
+		if tokenErr != nil {
+			return c.String(http.StatusInternalServerError, "could not start login")
+		}
+		c.SetCookie(sessionCookie(CSRFCookieName, fresh, h.secureCookies, time.Now().Add(time.Hour)))
+		return h.render(c, http.StatusBadRequest, tenantID, authRequestID, fresh, email,
 			"Your sign-in session expired. Try again.")
 	}
 

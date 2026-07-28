@@ -56,7 +56,7 @@ func (r *PostgresTokenRepository) CreateAccessToken(ctx context.Context,
 		emptyIfNil(token.Scopes), nullableID(token.RefreshTokenID), token.Expires).
 		Scan(&token.Created)
 	if err != nil {
-		return nil, err
+		return nil, constraintError(err, "access token")
 	}
 	return &token, nil
 }
@@ -117,7 +117,7 @@ func (r *PostgresTokenRepository) CreateRefreshToken(ctx context.Context,
 		emptyIfNil(token.Audience), emptyIfNil(token.Scopes), emptyIfNil(token.AMR),
 		token.AuthTime, token.Expires).Scan(&token.Created)
 	if err != nil {
-		return nil, "", err
+		return nil, "", constraintError(err, "refresh token")
 	}
 	return &token, plaintext, nil
 }

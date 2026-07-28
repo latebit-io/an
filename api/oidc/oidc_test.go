@@ -238,6 +238,12 @@ func (rp *relyingParty) get(target string) *http.Response {
 		return &http.Response{Request: &http.Request{URL: redirectURLFrom(err)}}
 	}
 	require.NoError(rp.t, err)
+	// Callers only ever read the body through readBody, which closes it,
+	// or ignore it entirely; closing here releases the connection either
+	// way without changing what they see.
+	if response.Body != nil {
+		rp.t.Cleanup(func() { _ = response.Body.Close() })
+	}
 	return response
 }
 
@@ -900,4 +906,90 @@ func TestPasswordResetEndsSingleSignOn(t *testing.T) {
 	after := rp.get(rp.config.AuthCodeURL("state-2", coreoidc.Nonce("nonce-2"),
 		oauth2.S256ChallengeOption(oauth2.GenerateVerifier())))
 	assert.Contains(t, readBody(t, after), "authRequestId")
+}
+
+// A failed CSRF check has to be recoverable. Re-rendering the form with an
+// empty token made every retry fail the same check, which reads to a user
+// as a login that simply does not work.
+func TestCSRFFailureIsRecoverable(t *testing.T) {
+	i := newIssuer(t)
+	rp := newRelyingParty(t, i, "email")
+
+	response := rp.get(rp.config.AuthCodeURL("state-1",
+		oauth2.S256ChallengeOption(oauth2.GenerateVerifier())))
+	body := readBody(t, response)
+	loginURL := response.Request.URL.String()
+
+	// Submit with a stale token: rejected, but the page comes back usable.
+	rejected, err := rp.client.PostForm(loginURL, url.Values{
+		"authRequestId": {field(t, body, "authRequestId")},
+		"csrf":          {"a-stale-token"},
+		"email":         {testEmail},
+		"password":      {testPassword},
+	})
+	require.NoError(t, err)
+	defer rejected.Body.Close()
+	require.Equal(t, http.StatusBadRequest, rejected.StatusCode)
+
+	retryBody := readBody(t, rejected)
+	retryToken := field(t, retryBody, "csrf")
+	require.NotEmpty(t, retryToken, "the retry must carry a fresh token, not an empty one")
+
+	// The retry succeeds, so the user is not stuck.
+	final, err := rp.client.PostForm(loginURL, url.Values{
+		"authRequestId": {field(t, retryBody, "authRequestId")},
+		"csrf":          {retryToken},
+		"email":         {testEmail},
+		"password":      {testPassword},
+	})
+	if stopped(err) {
+		assert.Contains(t, redirectURLFrom(err).String(), "code=")
+		return
+	}
+	require.NoError(t, err)
+	defer final.Body.Close()
+	assert.NotEqual(t, http.StatusBadRequest, final.StatusCode, "the retry must not fail the same way")
+}
+
+// Discovery must not offer an authentication method the token endpoint
+// refuses. Every client here is confidential, so "none" is not on offer.
+func TestAdvertisedAuthMethodsAreAccepted(t *testing.T) {
+	i := newIssuer(t)
+
+	response, err := http.Get(i.issuer() + DiscoveryPath)
+	require.NoError(t, err)
+	defer response.Body.Close()
+	var document map[string]any
+	require.NoError(t, json.NewDecoder(response.Body).Decode(&document))
+
+	assert.ElementsMatch(t, []any{"client_secret_basic", "client_secret_post"},
+		document["token_endpoint_auth_methods_supported"])
+	assert.NotContains(t, document["token_endpoint_auth_methods_supported"], "none",
+		"an unauthenticated client is refused, so it must not be advertised")
+
+	// And the two that are advertised really do authenticate.
+	tokenURL := document["token_endpoint"].(string)
+	form := url.Values{"grant_type": {"refresh_token"}, "refresh_token": {"bogus"}}
+
+	post := url.Values{}
+	for k, v := range form {
+		post[k] = v
+	}
+	post.Set("client_id", testClientID)
+	post.Set("client_secret", testClientSecret)
+	posted, err := http.PostForm(tokenURL, post)
+	require.NoError(t, err)
+	defer posted.Body.Close()
+	assert.NotContains(t, readBody(t, posted), "invalid_client",
+		"client_secret_post is advertised, so it must authenticate")
+
+	request, err := http.NewRequest(http.MethodPost, tokenURL, strings.NewReader(form.Encode()))
+	require.NoError(t, err)
+	request.Header.Set(echo.HeaderContentType, echo.MIMEApplicationForm)
+	request.SetBasicAuth(testClientID, testClientSecret)
+	basic, err := http.DefaultClient.Do(request)
+	require.NoError(t, err)
+	defer basic.Body.Close()
+	assert.NotContains(t, readBody(t, basic), "invalid_client",
+		"client_secret_basic is advertised, so it must authenticate")
 }
