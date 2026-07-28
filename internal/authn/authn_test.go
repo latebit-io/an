@@ -43,7 +43,7 @@ func newHarness(t *testing.T, maxAttempts int, lockFor time.Duration) *harness {
 	attempts := NewPostgresFailedAttemptRepository(pool)
 	accountRepository := accounts.NewPostgresAccountRepository(pool)
 	accountService := accounts.NewDefaultAccountService(accountRepository,
-		accounts.NewPostgresPasswordResetRepository(pool), sessions, attempts,
+		accounts.NewPostgresPasswordResetRepository(pool), []accounts.SessionRevoker{sessions}, attempts,
 		utils.NewPostgresTxManager(pool), 4, time.Hour)
 
 	return &harness{
@@ -61,7 +61,7 @@ func newHarness(t *testing.T, maxAttempts int, lockFor time.Duration) *harness {
 // registerVerified registers and verifies an account ready to log on.
 func (h *harness) registerVerified(t *testing.T, tenantID, email, password string) {
 	ctx := context.Background()
-	registered, err := h.accounts.Register(ctx, tenantID, email, password)
+	registered, err := h.accounts.Register(ctx, tenantID, email, password, "")
 	require.NoError(t, err)
 	require.NoError(t, h.accounts.Verify(ctx, tenantID, email, registered.VerificationToken))
 }
@@ -95,7 +95,7 @@ func TestAuthenticateGates(t *testing.T) {
 	ctx := context.Background()
 	h := newHarness(t, 5, time.Minute)
 
-	registered, err := h.accounts.Register(ctx, "default", "unverified@example.com", "password-1")
+	registered, err := h.accounts.Register(ctx, "default", "unverified@example.com", "password-1", "")
 	require.NoError(t, err)
 	_, err = h.service.Authenticate(ctx, "default", "unverified@example.com", "client-1", "password-1")
 	assert.ErrorAs(t, err, &accounts.AccountNotVerifiedError{})
@@ -372,4 +372,38 @@ func TestSessionExpiryCleanup(t *testing.T) {
 	deleted, err := h.sessions.DeleteExpired(ctx)
 	require.NoError(t, err)
 	assert.Equal(t, int64(1), deleted)
+}
+
+// The OIDC login UI authenticates through VerifyPassword, so a browser
+// login has to hit the same lockout counter as the api-key surface. If it
+// did not, /authorize would be an unmetered password oracle.
+func TestVerifyPasswordSharesLockout(t *testing.T) {
+	ctx := context.Background()
+	h := newHarness(t, 3, time.Hour)
+	h.registerVerified(t, "default", "user@example.com", "password-1")
+
+	account, err := h.service.VerifyPassword(ctx, "default", "user@example.com", "password-1")
+	require.NoError(t, err)
+	assert.Equal(t, "user@example.com", account.Email)
+	assert.NotEmpty(t, account.ID)
+
+	for range 3 {
+		_, err = h.service.VerifyPassword(ctx, "default", "user@example.com", "wrong")
+		require.Error(t, err)
+	}
+
+	// Locked out by the browser path, and the api-key path sees it too.
+	_, err = h.service.VerifyPassword(ctx, "default", "user@example.com", "password-1")
+	assert.ErrorAs(t, err, &AccountLockedError{})
+	_, err = h.service.Authenticate(ctx, "default", "user@example.com", "web", "password-1")
+	assert.ErrorAs(t, err, &AccountLockedError{})
+}
+
+// An unknown account must fail exactly like a wrong password here too.
+func TestVerifyPasswordUnknownAccountIsGeneric(t *testing.T) {
+	ctx := context.Background()
+	h := newHarness(t, 3, time.Hour)
+
+	_, err := h.service.VerifyPassword(ctx, "default", "nobody@example.com", "password-1")
+	assert.ErrorAs(t, err, &AuthenticationError{})
 }

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"strconv"
 	"strings"
@@ -20,12 +21,27 @@ type AppConfig struct {
 	LockoutDurationInSeconds    int
 	MagicCodeExpireInSeconds    int
 	MaxFailedAttempts           int
+	OidcAuthCodeExpireInSeconds int
+	OidcClientID                string
+	OidcClientSecret            string
+	OidcCryptoKey               string
+	OidcEnabled                 bool
+	OidcInsecure                bool
+	OidcPostLogoutRedirectURIs  []string
+	OidcRedirectURIs            []string
+	OidcSessionExpireInSeconds  int
 	PasswordCost                int
 	Port                        int
+	PublicBaseURL               string
 	RefreshTokenExpireInSeconds int
 	RequestsPerSecond           int
 	ResetTokenExpireInSeconds   int
 }
+
+// minCryptoKeyLength is the shortest OIDC_CRYPTO_KEY accepted. The value is
+// stretched to 32 bytes with sha256, which normalises the length but adds
+// no entropy, so the input has to carry it.
+const minCryptoKeyLength = 32
 
 func NewAppConfig() (*AppConfig, error) {
 	config := &AppConfig{}
@@ -48,6 +64,32 @@ func NewAppConfig() (*AppConfig, error) {
 	config.MagicCodeExpireInSeconds = getEnvAsInt("MAGIC_CODE_EXPIRE_IN_SECONDS", 600)
 	config.ResetTokenExpireInSeconds = getEnvAsInt("RESET_TOKEN_EXPIRE_IN_SECONDS", 3600)
 	config.GoogleClientID = getEnv("GOOGLE_CLIENT_ID", "")
+
+	// The OIDC provider surface. It stays off until a client is
+	// configured: an is an api-key service first, an issuer second.
+	config.PublicBaseURL = strings.TrimSuffix(getEnv("PUBLIC_BASE_URL", ""), "/")
+	config.OidcClientID = getEnv("OIDC_CLIENT_ID", "")
+	config.OidcClientSecret = getEnv("OIDC_CLIENT_SECRET", "")
+	config.OidcCryptoKey = getEnv("OIDC_CRYPTO_KEY", "")
+	config.OidcRedirectURIs = getEnvAsStringSlice("OIDC_REDIRECT_URIS", []string{})
+	config.OidcPostLogoutRedirectURIs = getEnvAsStringSlice("OIDC_POST_LOGOUT_REDIRECT_URIS",
+		[]string{})
+	config.OidcAuthCodeExpireInSeconds = getEnvAsInt("OIDC_AUTH_CODE_EXPIRE_IN_SECONDS", 300)
+	config.OidcSessionExpireInSeconds = getEnvAsInt("OIDC_SESSION_EXPIRE_IN_SECONDS", 43200)
+	config.OidcInsecure = getEnv("OIDC_INSECURE", "false") == "true"
+	// Redirect URIs are part of the predicate: with none registered every
+	// /authorize is refused, so a surface mounted without them is a
+	// provider that cannot log anyone in and says nothing about why.
+	config.OidcEnabled = config.PublicBaseURL != "" && config.OidcClientID != "" &&
+		config.OidcClientSecret != "" && config.OidcCryptoKey != "" &&
+		len(config.OidcRedirectURIs) > 0
+
+	if config.OidcEnabled && len(config.OidcCryptoKey) < minCryptoKeyLength {
+		return nil, fmt.Errorf(
+			"OIDC_CRYPTO_KEY must be at least %d characters of random data; it encrypts "+
+				"authorization codes and bearer tokens, and hashing does not rescue a guessable "+
+				"value (generate one with: openssl rand -hex 32)", minCryptoKeyLength)
+	}
 
 	return config, nil
 }
@@ -77,5 +119,14 @@ func getEnvAsStringSlice(key string, defaultValue []string) []string {
 	if valueStr == "" {
 		return defaultValue
 	}
-	return strings.Split(valueStr, ",")
+	values := strings.Split(valueStr, ",")
+	trimmed := make([]string, 0, len(values))
+	for _, value := range values {
+		// Redirect URIs and origins are matched exactly, so a space after a
+		// comma would otherwise be a registered URI nobody can match.
+		if value = strings.TrimSpace(value); value != "" {
+			trimmed = append(trimmed, value)
+		}
+	}
+	return trimmed
 }

@@ -180,3 +180,52 @@ func TestJWKSVerifiesToken(t *testing.T) {
 	assert.Equal(t, "default", claims.TenantID)
 	assert.True(t, claims.ExpiresAt.After(time.Now()))
 }
+
+// A rotation must reach a running service: external relying parties verify
+// against the published JWKS, so an issuer that needs a restart to roll a
+// key cannot roll one at all.
+func TestReloadKeysPicksUpRotation(t *testing.T) {
+	ctx := context.Background()
+	pool := utils.NewTestPool(t)
+	repository := NewPostgresSigningKeyRepository(pool)
+	service := NewDefaultSigningKeyService(repository)
+	require.NoError(t, service.Initialize(ctx))
+
+	tokenizer, err := NewDefaultTokenizer(ctx, "an", "an", 60, 60, service)
+	require.NoError(t, err)
+
+	before, _, err := tokenizer.CreateAccessToken(ctx, "default", "user@example.com", "web")
+	require.NoError(t, err)
+	firstKid := kidOf(t, before)
+
+	// Rotation is an insert of a newer key.
+	rotated, err := generateSigningKey()
+	require.NoError(t, err)
+	require.NoError(t, repository.Create(ctx, *rotated))
+
+	// Still signing with the old key until the reload.
+	stale, _, err := tokenizer.CreateAccessToken(ctx, "default", "user@example.com", "web")
+	require.NoError(t, err)
+	assert.Equal(t, firstKid, kidOf(t, stale))
+
+	require.NoError(t, tokenizer.ReloadKeys(ctx))
+
+	after, _, err := tokenizer.CreateAccessToken(ctx, "default", "user@example.com", "web")
+	require.NoError(t, err)
+	assert.Equal(t, rotated.Kid, kidOf(t, after))
+	assert.NotEqual(t, firstKid, kidOf(t, after))
+
+	// Tokens signed by the superseded key still validate: rotation adds a
+	// key, it does not retire the old one.
+	_, err = tokenizer.ValidateAccessToken(ctx, before)
+	assert.NoError(t, err)
+}
+
+func kidOf(t *testing.T, token string) string {
+	t.Helper()
+	parsed, _, err := jwt.NewParser().ParseUnverified(token, jwt.MapClaims{})
+	require.NoError(t, err)
+	kid, _ := parsed.Header["kid"].(string)
+	require.NotEmpty(t, kid)
+	return kid
+}

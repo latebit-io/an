@@ -100,7 +100,7 @@ func TestLogonCodeVerifiesAccount(t *testing.T) {
 	ctx := context.Background()
 	h := newCodeHarness(t, time.Minute)
 
-	_, err := h.accounts.Register(ctx, "default", "user@example.com", "password-1")
+	_, err := h.accounts.Register(ctx, "default", "user@example.com", "password-1", "")
 	require.NoError(t, err)
 
 	issued, err := h.codes.Request(ctx, "default", "user@example.com")

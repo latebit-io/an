@@ -19,6 +19,11 @@ type Authenticated struct {
 
 type AuthenticationService interface {
 	Authenticate(ctx context.Context, tenantID, email, clientID, password string) (*Authenticated, error)
+	// VerifyPassword runs the full logon gate (lockout, exists, enabled,
+	// verified, password) and returns the account without minting
+	// anything. The OIDC login UI authenticates through it so browser
+	// logins share one lockout counter with the api-key surface.
+	VerifyPassword(ctx context.Context, tenantID, email, password string) (*accounts.Account, error)
 	Acknowledge(ctx context.Context, tenantID string, authenticated Authenticated) error
 	Validate(ctx context.Context, tenantID, accessToken string) (*tokens.AccessClaims, error)
 	Renew(ctx context.Context, tenantID, refreshToken string) (*Authenticated, error)
@@ -51,6 +56,15 @@ func NewDefaultAuthenticationService(accountRepository accounts.AccountRepositor
 
 func (s *DefaultAuthenticationService) Authenticate(ctx context.Context, tenantID, email, clientID,
 	password string) (*Authenticated, error) {
+	if _, err := s.VerifyPassword(ctx, tenantID, email, password); err != nil {
+		return nil, err
+	}
+	authenticated, _, err := s.issue(ctx, tenantID, email, clientID)
+	return authenticated, err
+}
+
+func (s *DefaultAuthenticationService) VerifyPassword(ctx context.Context, tenantID, email,
+	password string) (*accounts.Account, error) {
 	account, err := s.gateLogon(ctx, tenantID, email)
 	if err != nil {
 		return nil, err
@@ -65,8 +79,7 @@ func (s *DefaultAuthenticationService) Authenticate(ctx context.Context, tenantI
 	if err := s.attempts.Clear(ctx, tenantID, email); err != nil {
 		return nil, err
 	}
-	authenticated, _, err := s.issue(ctx, tenantID, email, clientID)
-	return authenticated, err
+	return account, nil
 }
 
 func (s *DefaultAuthenticationService) Acknowledge(ctx context.Context, tenantID string,

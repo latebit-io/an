@@ -38,7 +38,7 @@ func newService(t *testing.T) (AccountService, AccountRepository, *revocations) 
 	repository := NewPostgresAccountRepository(pool)
 	resets := NewPostgresPasswordResetRepository(pool)
 	recorder := &revocations{}
-	service := NewDefaultAccountService(repository, resets, recorder, recorder,
+	service := NewDefaultAccountService(repository, resets, []SessionRevoker{recorder}, recorder,
 		utils.NewPostgresTxManager(pool), 4, time.Hour)
 	return service, repository, recorder
 }
@@ -47,7 +47,7 @@ func TestRegister(t *testing.T) {
 	ctx := context.Background()
 	service, _, _ := newService(t)
 
-	registered, err := service.Register(ctx, "default", "user@example.com", "password-1")
+	registered, err := service.Register(ctx, "default", "user@example.com", "password-1", "")
 	require.NoError(t, err)
 	assert.NotEmpty(t, registered.ID)
 	assert.NotEmpty(t, registered.VerificationToken)
@@ -55,10 +55,10 @@ func TestRegister(t *testing.T) {
 	assert.True(t, registered.Enabled)
 	assert.Empty(t, registered.PasswordHash)
 
-	_, err = service.Register(ctx, "default", "user@example.com", "password-1")
+	_, err = service.Register(ctx, "default", "user@example.com", "password-1", "")
 	assert.ErrorAs(t, err, &AccountDuplicateError{})
 
-	_, err = service.Register(ctx, "other", "user@example.com", "password-1")
+	_, err = service.Register(ctx, "other", "user@example.com", "password-1", "")
 	assert.NoError(t, err, "same email in another tenant is a different account")
 }
 
@@ -66,9 +66,9 @@ func TestRegisterValidation(t *testing.T) {
 	ctx := context.Background()
 	service, _, _ := newService(t)
 
-	_, err := service.Register(ctx, "default", "not-an-email", "password-1")
+	_, err := service.Register(ctx, "default", "not-an-email", "password-1", "")
 	assert.ErrorAs(t, err, &InvalidAccountError{})
-	_, err = service.Register(ctx, "default", "user@example.com", "short")
+	_, err = service.Register(ctx, "default", "user@example.com", "short", "")
 	assert.ErrorAs(t, err, &InvalidAccountError{})
 }
 
@@ -76,7 +76,7 @@ func TestVerify(t *testing.T) {
 	ctx := context.Background()
 	service, repository, _ := newService(t)
 
-	registered, err := service.Register(ctx, "default", "user@example.com", "password-1")
+	registered, err := service.Register(ctx, "default", "user@example.com", "password-1", "")
 	require.NoError(t, err)
 
 	err = service.Verify(ctx, "default", "user@example.com", "wrong-token")
@@ -97,7 +97,7 @@ func TestResendVerification(t *testing.T) {
 	ctx := context.Background()
 	service, _, _ := newService(t)
 
-	registered, err := service.Register(ctx, "default", "user@example.com", "password-1")
+	registered, err := service.Register(ctx, "default", "user@example.com", "password-1", "")
 	require.NoError(t, err)
 
 	token, err := service.ResendVerification(ctx, "default", "user@example.com")
@@ -116,7 +116,7 @@ func TestForgotAndReset(t *testing.T) {
 	ctx := context.Background()
 	service, repository, recorder := newService(t)
 
-	registered, err := service.Register(ctx, "default", "user@example.com", "password-1")
+	registered, err := service.Register(ctx, "default", "user@example.com", "password-1", "")
 	require.NoError(t, err)
 
 	reset, err := service.Forgot(ctx, "default", "user@example.com")
@@ -157,10 +157,10 @@ func TestResetExpiredToken(t *testing.T) {
 	repository := NewPostgresAccountRepository(pool)
 	resets := NewPostgresPasswordResetRepository(pool)
 	recorder := &revocations{}
-	service := NewDefaultAccountService(repository, resets, recorder, recorder,
+	service := NewDefaultAccountService(repository, resets, []SessionRevoker{recorder}, recorder,
 		utils.NewPostgresTxManager(pool), 4, -time.Minute)
 
-	_, err := service.Register(ctx, "default", "user@example.com", "password-1")
+	_, err := service.Register(ctx, "default", "user@example.com", "password-1", "")
 	require.NoError(t, err)
 
 	reset, err := service.Forgot(ctx, "default", "user@example.com")
@@ -174,7 +174,7 @@ func TestUpdatePassword(t *testing.T) {
 	ctx := context.Background()
 	service, repository, _ := newService(t)
 
-	_, err := service.Register(ctx, "default", "user@example.com", "password-1")
+	_, err := service.Register(ctx, "default", "user@example.com", "password-1", "")
 	require.NoError(t, err)
 
 	err = service.UpdatePassword(ctx, "default", "user@example.com", "wrong", "password-2")
@@ -193,7 +193,7 @@ func TestDelete(t *testing.T) {
 	ctx := context.Background()
 	service, _, recorder := newService(t)
 
-	_, err := service.Register(ctx, "default", "user@example.com", "password-1")
+	_, err := service.Register(ctx, "default", "user@example.com", "password-1", "")
 	require.NoError(t, err)
 
 	require.NoError(t, service.Delete(ctx, "default", "user@example.com"))
@@ -224,4 +224,74 @@ func TestCreateVerified(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, stored.Verified)
 	assert.Empty(t, stored.VerificationHash)
+}
+
+// The name claim is the only profile field an holds. It is optional, and an
+// absent name must stay absent rather than becoming an empty string, so the
+// id_token omits the claim instead of asserting it empty.
+func TestRegisterWithName(t *testing.T) {
+	ctx := context.Background()
+	service, repository, _ := newService(t)
+
+	registered, err := service.Register(ctx, "default", "named@example.com", "password-1", "Ada Lovelace")
+	require.NoError(t, err)
+	assert.Equal(t, "Ada Lovelace", registered.Name)
+
+	stored, err := repository.Read(ctx, "default", "named@example.com")
+	require.NoError(t, err)
+	assert.Equal(t, "Ada Lovelace", stored.Name)
+
+	_, err = service.Register(ctx, "default", "anon@example.com", "password-1", "")
+	require.NoError(t, err)
+	anonymous, err := repository.Read(ctx, "default", "anon@example.com")
+	require.NoError(t, err)
+	assert.Empty(t, anonymous.Name)
+}
+
+func TestUpdateName(t *testing.T) {
+	ctx := context.Background()
+	service, repository, _ := newService(t)
+
+	_, err := service.Register(ctx, "default", "user@example.com", "password-1", "Before")
+	require.NoError(t, err)
+
+	require.NoError(t, service.UpdateName(ctx, "default", "user@example.com", "After"))
+	stored, err := repository.Read(ctx, "default", "user@example.com")
+	require.NoError(t, err)
+	assert.Equal(t, "After", stored.Name)
+
+	// Clearing drops the claim rather than asserting an empty one.
+	require.NoError(t, service.UpdateName(ctx, "default", "user@example.com", ""))
+	cleared, err := repository.Read(ctx, "default", "user@example.com")
+	require.NoError(t, err)
+	assert.Empty(t, cleared.Name)
+
+	err = service.UpdateName(ctx, "default", "user@example.com", string(make([]byte, 129)))
+	assert.ErrorAs(t, err, &InvalidAccountError{})
+
+	err = service.UpdateName(ctx, "default", "missing@example.com", "Nobody")
+	assert.ErrorAs(t, err, &AccountNotFoundError{})
+}
+
+// ReadByID backs the OIDC subject lookup: sub is the account id, so every
+// claim in the id_token is resolved from it rather than from the email.
+func TestReadByID(t *testing.T) {
+	ctx := context.Background()
+	service, repository, _ := newService(t)
+
+	registered, err := service.Register(ctx, "default", "user@example.com", "password-1", "Ada")
+	require.NoError(t, err)
+
+	account, err := repository.ReadByID(ctx, "default", registered.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "user@example.com", account.Email)
+	assert.Equal(t, "Ada", account.Name)
+
+	// Another tenant must not resolve the same id.
+	_, err = repository.ReadByID(ctx, "other", registered.ID)
+	assert.ErrorAs(t, err, &AccountNotFoundError{})
+
+	// A malformed id is a miss, not a database error.
+	_, err = repository.ReadByID(ctx, "default", "not-a-uuid")
+	assert.ErrorAs(t, err, &AccountNotFoundError{})
 }

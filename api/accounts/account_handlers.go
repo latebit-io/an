@@ -18,6 +18,13 @@ type RegisterAccountRequest struct {
 	TenantID string `json:"tenantId"`
 	Email    string `json:"email"`
 	Password string `json:"password"`
+	Name     string `json:"name"`
+}
+
+type UpdateNameRequest struct {
+	TenantID string `json:"tenantId"`
+	Email    string `json:"email"`
+	Name     string `json:"name"`
 }
 
 type VerifyAccountRequest struct {
@@ -73,12 +80,29 @@ func (ah AccountHandler) Register(c *echo.Context) error {
 	}
 
 	registered, err := ah.accounts.Register(c.Request().Context(),
-		auth.EffectiveTenant(c, request.TenantID), request.Email, request.Password)
+		auth.EffectiveTenant(c, request.TenantID), request.Email, request.Password, request.Name)
 	if err != nil {
 		return accountProblem(c, err)
 	}
 
 	return c.JSON(http.StatusCreated, registered)
+}
+
+// UpdateName sets the display name behind the OIDC name claim.
+func (ah AccountHandler) UpdateName(c *echo.Context) error {
+	request := new(UpdateNameRequest)
+	if err := c.Bind(request); err != nil {
+		httpError := problem.NewBadRequest(err)
+		return c.JSON(httpError.Status, httpError)
+	}
+
+	err := ah.accounts.UpdateName(c.Request().Context(),
+		auth.EffectiveTenant(c, request.TenantID), request.Email, request.Name)
+	if err != nil {
+		return accountProblem(c, err)
+	}
+
+	return c.NoContent(http.StatusNoContent)
 }
 
 func (ah AccountHandler) Verify(c *echo.Context) error {

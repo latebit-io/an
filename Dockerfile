@@ -1,5 +1,8 @@
 # Build stage
-FROM golang:1.26-alpine AS builder
+# Pinned to the patch go.mod requires. The floating 1.26 tag resolves to
+# whatever is cached locally, which silently predates go.mod and then fails
+# in `go mod verify` because GOTOOLCHAIN=local cannot fetch a newer one.
+FROM golang:1.26.4-alpine AS builder
 
 WORKDIR /app
 

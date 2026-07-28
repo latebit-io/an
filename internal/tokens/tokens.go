@@ -87,7 +87,7 @@ func (s *DefaultSigningKeyService) JWKS(ctx context.Context) (*JWKS, error) {
 	}
 	jwks := &JWKS{Keys: []JWK{}}
 	for _, key := range keys {
-		publicKey, err := parsePublicKey(key.PublicKeyPEM)
+		publicKey, err := ParsePublicKey(key.PublicKeyPEM)
 		if err != nil {
 			return nil, err
 		}
@@ -129,7 +129,10 @@ func generateSigningKey() (*SigningKey, error) {
 	}, nil
 }
 
-func parsePrivateKey(keyPEM string) (*rsa.PrivateKey, error) {
+// ParsePrivateKey and ParsePublicKey are exported so the OIDC provider can
+// sign and publish with the same keys as the api-key surface rather than
+// holding a second key set.
+func ParsePrivateKey(keyPEM string) (*rsa.PrivateKey, error) {
 	block, _ := pem.Decode([]byte(keyPEM))
 	if block == nil {
 		return nil, errors.New("failed to decode private key PEM block")
@@ -137,7 +140,7 @@ func parsePrivateKey(keyPEM string) (*rsa.PrivateKey, error) {
 	return x509.ParsePKCS1PrivateKey(block.Bytes)
 }
 
-func parsePublicKey(keyPEM string) (*rsa.PublicKey, error) {
+func ParsePublicKey(keyPEM string) (*rsa.PublicKey, error) {
 	block, _ := pem.Decode([]byte(keyPEM))
 	if block == nil {
 		return nil, errors.New("failed to decode public key PEM block")

@@ -18,17 +18,34 @@ const (
 	contextRoot   = "an.root"
 )
 
-// Middleware authenticates every request (except /health and /.well-known/)
-// with an api key.
+// PublicPath reports whether a path is served without an api key.
+//
+// The api key gate has three exceptions. /health and /.well-known/ were
+// always open. The OIDC provider surface is the third and newest: those
+// routes are browser and relying-party facing and cannot carry
+// X-AN-API-KEY, so /token and /userinfo authenticate the client and
+// /authorize authenticates the user instead. The predicate is injected
+// rather than hardcoded so this package keeps no dependency on the OIDC
+// one.
+type PublicPath func(path string) bool
+
+// Middleware authenticates every request with an api key, except the paths
+// PublicPath admits.
 // The bootstrap key (env) is the root credential: it operates on any tenant
 // and is the only key that can manage api keys. Tenant keys are locked to
 // their tenant regardless of the tenantId in the request body.
-func Middleware(service apikeys.ApiKeyService, bootstrapKey string) echo.MiddlewareFunc {
+func Middleware(service apikeys.ApiKeyService, bootstrapKey string,
+	public ...PublicPath) echo.MiddlewareFunc {
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c *echo.Context) error {
 			path := c.Request().URL.Path
 			if path == "/health" || strings.HasPrefix(path, "/.well-known/") {
 				return next(c)
+			}
+			for _, isPublic := range public {
+				if isPublic(path) {
+					return next(c)
+				}
 			}
 
 			token := c.Request().Header.Get(HeaderApiKey)

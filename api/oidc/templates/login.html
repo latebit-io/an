@@ -1,0 +1,42 @@
+{{define "login"}}<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sign in</title>
+<style>
+:root { color-scheme: light dark; }
+body {
+  font: 16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+  display: flex; align-items: center; justify-content: center;
+  min-height: 100vh; margin: 0; padding: 1rem;
+}
+form { width: 100%; max-width: 22rem; }
+h1 { font-size: 1.25rem; margin: 0 0 1.5rem; }
+label { display: block; margin: 0 0 1rem; }
+span { display: block; font-size: 0.875rem; margin-bottom: 0.25rem; }
+input[type=email], input[type=password] {
+  width: 100%; padding: 0.5rem; font: inherit; box-sizing: border-box;
+}
+button { width: 100%; padding: 0.5rem; font: inherit; cursor: pointer; }
+.error { padding: 0.5rem 0.75rem; margin-bottom: 1rem; border-left: 3px solid currentColor; }
+</style>
+</head>
+<body>
+<form method="post" action="{{.Action}}">
+  <h1>Sign in</h1>
+  {{if .Error}}<p class="error">{{.Error}}</p>{{end}}
+  <input type="hidden" name="authRequestId" value="{{.AuthRequestID}}">
+  <input type="hidden" name="csrf" value="{{.CSRF}}">
+  <label>
+    <span>Email</span>
+    <input type="email" name="email" value="{{.Email}}" autocomplete="username" required autofocus>
+  </label>
+  <label>
+    <span>Password</span>
+    <input type="password" name="password" autocomplete="current-password" required>
+  </label>
+  <button type="submit">Sign in</button>
+</form>
+</body>
+</html>{{end}}
