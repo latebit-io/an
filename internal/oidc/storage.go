@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/rsa"
 	"errors"
-	"slices"
 	"sync"
 	"time"
 
@@ -14,17 +13,6 @@ import (
 	"github.com/zitadel/oidc/v3/pkg/oidc"
 	"github.com/zitadel/oidc/v3/pkg/op"
 )
-
-// GroupSource resolves the groups claim. az owns role assignments, so an
-// asks it rather than holding a second copy. It is optional: with no source
-// wired the groups scope yields nothing, which is the first-cut behaviour.
-//
-// An outage must never mint an empty groups claim. Empty groups fail closed
-// downstream and present to users as a permissions outage rather than an
-// authentication one, so an error here has to propagate.
-type GroupSource interface {
-	Groups(ctx context.Context, tenantID, accountID string) ([]string, error)
-}
 
 // The provider library only ever sees an through these two interfaces.
 var (
@@ -40,7 +28,6 @@ type Storage struct {
 	accounts       accounts.AccountRepository
 	signingKeys    tokens.SigningKeyService
 	clients        ClientRegistry
-	groups         GroupSource
 	loginURL       func(tenantID, authRequestID string) string
 	authCodeExpiry time.Duration
 	accessExpiry   time.Duration
@@ -101,11 +88,6 @@ func (s *Storage) ReloadKeys(ctx context.Context) error {
 	s.signingKey = &signingKey{kid: latest.Kid, key: privateKey}
 	s.keySet = keySet
 	return nil
-}
-
-// SetGroupSource wires az in. Without it the groups scope is inert.
-func (s *Storage) SetGroupSource(source GroupSource) {
-	s.groups = source
 }
 
 // Health backs the library's readiness check.
@@ -346,9 +328,9 @@ func (s *Storage) SetUserinfoFromScopes(ctx context.Context, userinfo *oidc.User
 	return nil
 }
 
-// SetUserinfoFromRequest shapes the claims for the id_token. The four the
-// first consumer requires (email, email_verified, name, groups) must be
-// here: it reads them from the id_token only and never calls UserInfo.
+// SetUserinfoFromRequest shapes the claims for the id_token. The three the
+// first consumer requires (email, email_verified, name) must be here: it
+// reads them from the id_token only and never calls UserInfo.
 func (s *Storage) SetUserinfoFromRequest(ctx context.Context, userinfo *oidc.UserInfo,
 	request op.IDTokenRequest, scopes []string) error {
 	return s.setUserinfo(ctx, userinfo, request.GetSubject(), scopes)
@@ -389,22 +371,12 @@ func (s *Storage) SetIntrospectionFromToken(ctx context.Context,
 	return nil
 }
 
-// GetPrivateClaimsFromScopes carries the groups claim, which is not part of
-// the standard profile.
+// GetPrivateClaimsFromScopes is where claims outside the standard profile
+// would go. an mints none: every scope it supports maps onto a registered
+// claim, shaped in setUserinfo.
 func (s *Storage) GetPrivateClaimsFromScopes(ctx context.Context, subject, clientID string,
 	scopes []string) (map[string]any, error) {
-	tenantID, err := TenantFrom(ctx)
-	if err != nil {
-		return nil, err
-	}
-	if !slices.Contains(scopes, ScopeGroups) {
-		return nil, nil
-	}
-	groups, err := s.resolveGroups(ctx, tenantID, subject)
-	if err != nil {
-		return nil, err
-	}
-	return map[string]any{"groups": groups}, nil
+	return nil, nil
 }
 
 // SigningKey returns the key the provider signs id_tokens with: an's own
@@ -478,32 +450,9 @@ func (s *Storage) setUserinfo(ctx context.Context, userinfo *oidc.UserInfo, subj
 			userinfo.EmailVerified = oidc.Bool(account.Verified)
 		case oidc.ScopeProfile:
 			userinfo.Name = account.Name
-		case ScopeGroups:
-			groups, err := s.resolveGroups(ctx, tenantID, account.ID)
-			if err != nil {
-				return err
-			}
-			userinfo.AppendClaims("groups", groups)
 		}
 	}
 	return nil
-}
-
-// resolveGroups asks az. With no source wired the claim is an empty list,
-// which is the honest answer while step 3 is outstanding; once a source is
-// wired, its failure propagates rather than degrading to empty.
-func (s *Storage) resolveGroups(ctx context.Context, tenantID, accountID string) ([]string, error) {
-	if s.groups == nil {
-		return []string{}, nil
-	}
-	groups, err := s.groups.Groups(ctx, tenantID, accountID)
-	if err != nil {
-		return nil, err
-	}
-	if groups == nil {
-		groups = []string{}
-	}
-	return groups, nil
 }
 
 func (s *Storage) createAccessToken(ctx context.Context, tenantID string, request op.TokenRequest,

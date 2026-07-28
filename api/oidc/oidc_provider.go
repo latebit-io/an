@@ -64,7 +64,7 @@ func NewProvider(storage *internaloidc.Storage, config ProviderConfig) (*op.Prov
 		GrantTypeRefreshToken: true,
 		SupportedScopes:       internaloidc.SupportedScopes,
 		SupportedClaims: []string{
-			"sub", "email", "email_verified", "name", "groups", "aud", "exp", "iat", "iss",
+			"sub", "email", "email_verified", "name", "aud", "exp", "iat", "iss",
 			"auth_time", "nonce",
 		},
 	}

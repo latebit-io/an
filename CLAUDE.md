@@ -54,6 +54,10 @@ go-oidc), `oidc` (OpenID provider surface on zitadel/oidc `op`).
   only in the minting response.
 - Social accounts are born verified (provider must assert `email_verified`).
 - No roles claim in JWTs — az owns authorization.
+- an and az are independent: an imports nothing from az and calls it at no
+  point. That holds for the OIDC surface too — there is no `groups` scope and
+  no `groups` claim. An application that needs both composes them, asking az
+  at the point of use rather than reading a claim minted at sign-in.
 - OIDC `sub` is the account id (UUIDv7), never the email. Relying parties
   key their user tables on it, so it can never change.
 - OIDC access tokens are opaque, not JWTs: `AUDIENCE` is one global value

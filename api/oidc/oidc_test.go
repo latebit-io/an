@@ -317,7 +317,7 @@ func field(t *testing.T, body, name string) string {
 func TestAuthorizationCodeFlow(t *testing.T) {
 	ctx := context.Background()
 	i := newIssuer(t)
-	rp := newRelyingParty(t, i, coreoidc.ScopeOpenID, "email", "profile", "groups")
+	rp := newRelyingParty(t, i, coreoidc.ScopeOpenID, "email", "profile")
 
 	verifier := oauth2.GenerateVerifier()
 	callback := rp.authorize("state-1", "nonce-1", verifier)
@@ -341,11 +341,10 @@ func TestAuthorizationCodeFlow(t *testing.T) {
 	assert.Equal(t, "nonce-1", idToken.Nonce)
 
 	var claims struct {
-		Subject       string   `json:"sub"`
-		Email         string   `json:"email"`
-		EmailVerified bool     `json:"email_verified"`
-		Name          string   `json:"name"`
-		Groups        []string `json:"groups"`
+		Subject       string `json:"sub"`
+		Email         string `json:"email"`
+		EmailVerified bool   `json:"email_verified"`
+		Name          string `json:"name"`
 	}
 	require.NoError(t, idToken.Claims(&claims))
 
@@ -356,16 +355,15 @@ func TestAuthorizationCodeFlow(t *testing.T) {
 	assert.Equal(t, testEmail, claims.Email)
 	assert.True(t, claims.EmailVerified)
 	assert.Equal(t, testName, claims.Name)
-	assert.NotNil(t, claims.Groups)
 }
 
-// The claims constraint is worth its own assertion: the first consumer
-// reads all four from the id_token and never calls UserInfo, so a missing
-// one fails opaquely downstream rather than loudly here.
+// The claims constraint is worth its own assertion: a consumer that reads
+// them from the id_token and never calls UserInfo gets a missing one as an
+// opaque downstream failure rather than loudly here.
 func TestIDTokenCarriesAllRequiredClaims(t *testing.T) {
 	ctx := context.Background()
 	i := newIssuer(t)
-	rp := newRelyingParty(t, i, "email", "profile", "groups")
+	rp := newRelyingParty(t, i, "email", "profile")
 
 	verifier := oauth2.GenerateVerifier()
 	callback := rp.authorize("state-1", "nonce-1", verifier)
@@ -378,9 +376,12 @@ func TestIDTokenCarriesAllRequiredClaims(t *testing.T) {
 
 	var claims map[string]any
 	require.NoError(t, idToken.Claims(&claims))
-	for _, claim := range []string{"sub", "email", "email_verified", "name", "groups"} {
+	for _, claim := range []string{"sub", "email", "email_verified", "name"} {
 		assert.Contains(t, claims, claim, "the id_token must carry %s", claim)
 	}
+	// Roles and memberships live in az, which an does not read. A consumer
+	// that needs them asks az itself.
+	assert.NotContains(t, claims, "groups")
 }
 
 // UserInfo is reached with the opaque access token and must agree with the
@@ -735,6 +736,11 @@ func TestDiscoveryDoesNotOverAdvertise(t *testing.T) {
 		document["grant_types_supported"])
 	assert.NotContains(t, document, "device_authorization_endpoint",
 		"the device flow has no backing storage here")
+	// Roles and memberships live in az. an does not read them, so it must
+	// not advertise a scope or a claim it cannot fill: a relying party that
+	// believes the document would wire itself to a claim never minted.
+	assert.NotContains(t, document["scopes_supported"], "groups")
+	assert.NotContains(t, document["claims_supported"], "groups")
 
 	// What remains still has to be the truth, and still has to come from
 	// the library rather than a hand-written copy.
@@ -743,6 +749,28 @@ func TestDiscoveryDoesNotOverAdvertise(t *testing.T) {
 	assert.Contains(t, document, "userinfo_endpoint")
 	assert.Contains(t, document, "end_session_endpoint")
 	assert.Contains(t, document, "jwks_uri")
+}
+
+// A client that asks for groups anyway gets a working sign-in and no such
+// claim. an authenticates; az authorizes; the application composes them.
+func TestGroupsScopeYieldsNoClaim(t *testing.T) {
+	ctx := context.Background()
+	i := newIssuer(t)
+	rp := newRelyingParty(t, i, "email", "profile", "groups")
+
+	verifier := oauth2.GenerateVerifier()
+	callback := rp.authorize("state-1", "nonce-1", verifier)
+	token, err := rp.config.Exchange(ctx, callback.Query().Get("code"),
+		oauth2.VerifierOption(verifier))
+	require.NoError(t, err)
+
+	idToken, err := rp.verifier.Verify(ctx, token.Extra("id_token").(string))
+	require.NoError(t, err)
+
+	var claims map[string]any
+	require.NoError(t, idToken.Claims(&claims))
+	assert.NotContains(t, claims, "groups")
+	assert.Equal(t, testEmail, claims["email"], "the rest of the sign-in is unaffected")
 }
 
 // Everything discovery still advertises must actually work, which is the
