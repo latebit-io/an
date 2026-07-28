@@ -10,15 +10,16 @@ import (
 	"github.com/zitadel/oidc/v3/pkg/op"
 )
 
-// Scopes an issues. Anything else is refused rather than silently dropped.
-const ScopeGroups = "groups"
-
 // SupportedScopes and SupportedGrantTypes are the one statement of what
 // this issuer accepts. Discovery advertises them and the client enforces
 // them, so the document cannot promise what /authorize refuses.
+//
+// There is no groups scope. Roles and memberships live in az, and an does
+// not read them: the two services are independent and a consuming
+// application composes them.
 var (
 	SupportedScopes = []string{
-		oidc.ScopeOpenID, oidc.ScopeEmail, oidc.ScopeProfile, oidc.ScopeOfflineAccess, ScopeGroups,
+		oidc.ScopeOpenID, oidc.ScopeEmail, oidc.ScopeProfile, oidc.ScopeOfflineAccess,
 	}
 	SupportedGrantTypes = []oidc.GrantType{oidc.GrantTypeCode, oidc.GrantTypeRefreshToken}
 )

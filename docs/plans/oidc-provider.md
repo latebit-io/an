@@ -108,7 +108,7 @@ A minimal conformant issuer. Deliberately not all of OIDC.
 | `/token` | Code exchange with client authentication, plus the `refresh_token` grant |
 | `/userinfo` | Small, given the claims are already computed. See below |
 | `/end_session` | RP-initiated, advertised as `end_session_endpoint`; `/logout` is an alias |
-| `id_token` minting | `sub` = account id; `email`, `email_verified`, `groups`, `name`; `aud` = client id |
+| `id_token` minting | `sub` = account id; `email`, `email_verified`, `name`; `aud` = client id |
 | Account `name` | Migration, plus registration and profile update. No source exists today |
 | OIDC client registry | Client id, secret hash, redirect URIs, allowed scopes, first-party flag, per tenant |
 | `state`, `nonce`, PKCE | CSRF and replay defence |
@@ -118,7 +118,7 @@ A minimal conformant issuer. Deliberately not all of OIDC.
 - Dynamic client registration. Clients are registered out of band.
 - Front-channel and back-channel logout notification. RP-initiated logout is in scope.
 - Consent screens. First-party clients only to begin with, enforced by a `first_party` flag on the client record so that registering a third-party client later fails loudly instead of silently skipping consent.
-- Scopes beyond a fixed set (`openid`, `email`, `profile`, `groups`, `offline_access`).
+- Scopes beyond a fixed set (`openid`, `email`, `profile`, `offline_access`).
 - Re-keying the internal model from email to account id.
 
 ### Why UserInfo is no longer deferred
@@ -127,11 +127,11 @@ The first consumer never calls it, but relying-party libraries commonly fetch it
 
 ## The claims constraint
 
-**Claims must be in the `id_token`.** The demarkus broker reads them from the id_token only and never calls UserInfo. This is not incidental: the appliance's bundled Authelia configuration carries a mandatory claims policy pinning exactly `email`, `email_verified`, `groups`, and `name` into the id_token, precisely because of this.
+**Claims must be in the `id_token`.** The demarkus broker reads them from the id_token only and never calls UserInfo. This is not incidental: the appliance's bundled Authelia configuration carries a mandatory claims policy pinning claims into the id_token, precisely because of this.
 
 Getting it wrong produces logins that fail opaquely rather than loudly, so it is worth a conformance test rather than a manual check.
 
-Sources: `email` and `email_verified` map directly to `Account.Email` and `Account.Verified`. `name` does not exist yet and is the migration listed above. `groups` comes from `az`, below.
+Sources: `email` and `email_verified` map directly to `Account.Email` and `Account.Verified`. `name` does not exist yet and is the migration listed above. There is no `groups` claim; see below.
 
 ## Do not hand-roll the protocol
 
@@ -154,7 +154,7 @@ The rest follows the decisions already taken:
 
 - `CreateAccessToken` returns a token id, so **opaque access tokens are the native path**, exactly as decided above. Fosite would need a custom strategy to get there.
 - `SigningKey`, `SignatureAlgorithms`, and `KeySet` are storage callbacks, so `an` keeps its existing signing keys, rotation model, and JWKS rather than adopting the library's.
-- `SetUserinfoFromRequest` and `GetPrivateClaimsFromScopes` are where `email`, `email_verified`, `name`, and `groups` are injected. The claims constraint gets a first-class home in both the `id_token` and UserInfo instead of a hand-written endpoint.
+- `SetUserinfoFromRequest` is where `email`, `email_verified`, and `name` are injected. The claims constraint gets a first-class home in both the `id_token` and UserInfo instead of a hand-written endpoint.
 - `TerminateSession` backs the logout decision.
 - `NewProvider` takes an `IssuerFromRequest func(*http.Request) string`, so the per-tenant issuer `https://<host>/t/<tenantId>` is derived from the request rather than fought for.
 
@@ -179,19 +179,23 @@ Conformance is the largest risk in this work. State, nonce, PKCE, code single-us
 
 `/api/authenticate/code` already means the passwordless magic code. The OAuth authorization code is a different thing with the same word. The new domain is `oidc` throughout (`internal/oidc`, `api/oidc`) and the word "code" is never used unqualified in either.
 
-## Groups
+## Groups: dropped 2026-07-28
 
-The `groups` claim is what makes this useful to the demarkus broker, whose per-world access predicate matches on `domains`, `groups`, and `emails`. Sourcing groups from `az` means role assignments there drive access without a new mechanism.
+There is no `groups` claim, and `an` does not read `az`.
 
-This is the one place the plan adds a runtime dependency `an` does not have today. `an` currently depends on nothing, which is what keeps the authn/authz split clean; a synchronous call to `az` at mint time makes `az` an availability dependency of signing in anywhere. Three mitigations, all in scope:
+The original plan had `an` call `az` at token mint time to fill a `groups` claim, on the grounds that the demarkus broker's per-world predicate matches on `domains`, `groups`, and `emails`, and that sourcing groups from `az` would let role assignments drive access without a new mechanism. It named the cost too: `an` depends on nothing today, and a synchronous call to `az` at mint time would make `az` an availability dependency of signing in anywhere. Three mitigations were specified, an opt-in scope, a short cache, and fail-closed minting.
 
-- The `groups` scope is opt-in per client. A client that does not request it never touches `az`, so an `az` outage cannot block logins that do not need groups.
-- Memberships are cached per `(tenant, account)` with a short TTL, so an `az` blip does not become a login outage.
-- On a cache miss with `az` unreachable, minting **fails**. It never mints empty groups. Empty groups fail closed at the broker and present to users as a permissions outage rather than an authentication one, so the error must propagate.
+Implementation started and was stopped. The mitigations were treating the coupling as a cost to manage rather than as the thing to avoid, and naming a cost before designing around it is what let the shape survive two reviews.
 
-Two open questions worth settling before implementation:
+`an` and `az` are independent services, composed at the consuming application. `an` says who someone is; `az` says what they may do; an application that needs both calls both. This is recorded as `mark-knowledge` ADR 0009, and the first consumer works that way: the operator console checks `az` in middleware, keyed on the operator email from the `id_token`.
 
-- Whether groups are computed at token mint time or refreshed on renewal, which decides how quickly a role change takes effect downstream. The cache TTL above is the same question in another form; settle them together.
+Consequences carried:
+
+- The broker cannot match on `groups` from this issuer, because a claim `an` never mints is one the broker cannot read. Per-world access keys on `domains` and `emails`, both already supported by its `AllowConfig`.
+- A relying party that needs roles asks `az` itself, at the point of use. That is also fresher than a claim: a token asserts what was true when it was minted, a check asks what is true now.
+
+Still open, unchanged by this:
+
 - Whether each consuming tenant is its own `an` tenant, or one `an` tenant with per-tenant grouping in `az`. The per-tenant issuer URL decided above makes the first option cheap, which is an argument for it.
 
 ## Signing keys
@@ -203,14 +207,14 @@ JWKS and rotation already exist, but `NewDefaultTokenizer` parses the key set on
 0. **Pick the library.** Done 2026-07-27: `zitadel/oidc/v3`, reasoning above.
 1. **Discovery, `/authorize` with the login UI and browser session, `/token`, `/userinfo`, `/logout`, id_token minting**, with one hardcoded confidential client. No client registry yet. Includes the `name` migration and the key-set reload.
 2. **Switch a real consumer.** The `mark-knowledge` operator console currently posts operator passwords to `/api/authenticate` and holds them in transit. Moving it to the code flow deletes that code and exercises the whole loop against a small, low-risk app before anything external depends on it.
-3. **`groups` sourced from `az`**, with the opt-in scope and the cache.
+3. ~~**`groups` sourced from `az`**~~. Dropped 2026-07-28, see above. The console gained an `az` middleware instead, and the scope and `GroupSource` seam were removed from `an`.
 4. **Client registry**, so consumers can be registered per tenant rather than hardcoded.
 
 Step 2 is the important one. A local console is a far cheaper first consumer than a broker on a provisioned box, and it proves the flow end to end while the blast radius is one staff tool.
 
 ## Done when
 
-A browser can sign in at `/t/<tenantId>/authorize`, a confidential client can exchange the code at `/token`, and the returned `id_token` verifies against the published JWKS and carries `sub` (the account id), `email`, `email_verified`, `groups`, and `name`. A second app sharing the issuer signs the same user in without a second prompt, and `/logout` ends that session. The `mark-knowledge` console authenticates through the flow and contains no password-handling code.
+A browser can sign in at `/t/<tenantId>/authorize`, a confidential client can exchange the code at `/token`, and the returned `id_token` verifies against the published JWKS and carries `sub` (the account id), `email`, `email_verified`, and `name`. A second app sharing the issuer signs the same user in without a second prompt, and `/logout` ends that session. The `mark-knowledge` console authenticates through the flow and contains no password-handling code.
 
 The failure-path tests below pass, and the OpenID Foundation conformance suite runs green against the basic OP profile. Conformance is an exit criterion, not a follow-up.
 
@@ -220,7 +224,7 @@ Per this repo's convention, no mocks and real services: embedded PostgreSQL, a r
 
 `go-oidc` and `golang.org/x/oauth2` are **already dependencies**, pulled in for Google sign-in. The integration suite can therefore drive a genuine relying party: real code flow, real PKCE, real discovery, and an `id_token` verified by the same library an external consumer would use, with no browser and no mocks. That is the conformance test the claims constraint asks for, and it costs nothing new.
 
-Worth explicit tests for the failure paths, since they are the security-relevant ones: reused authorization code, mismatched redirect URI, wrong client secret, tampered `state`, replayed `nonce`, expired code, PKCE verifier mismatch, refresh token reuse after rotation, and an `az` outage during a `groups` mint (which must fail, not mint empty).
+Worth explicit tests for the failure paths, since they are the security-relevant ones: reused authorization code, mismatched redirect URI, wrong client secret, tampered `state`, replayed `nonce`, expired code, PKCE verifier mismatch, refresh token reuse after rotation.
 
 ## Related
 
