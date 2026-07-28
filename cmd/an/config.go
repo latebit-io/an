@@ -20,8 +20,18 @@ type AppConfig struct {
 	LockoutDurationInSeconds    int
 	MagicCodeExpireInSeconds    int
 	MaxFailedAttempts           int
+	OidcAuthCodeExpireInSeconds int
+	OidcClientID                string
+	OidcClientSecret            string
+	OidcCryptoKey               string
+	OidcEnabled                 bool
+	OidcInsecure                bool
+	OidcPostLogoutRedirectURIs  []string
+	OidcRedirectURIs            []string
+	OidcSessionExpireInSeconds  int
 	PasswordCost                int
 	Port                        int
+	PublicBaseURL               string
 	RefreshTokenExpireInSeconds int
 	RequestsPerSecond           int
 	ResetTokenExpireInSeconds   int
@@ -48,6 +58,21 @@ func NewAppConfig() (*AppConfig, error) {
 	config.MagicCodeExpireInSeconds = getEnvAsInt("MAGIC_CODE_EXPIRE_IN_SECONDS", 600)
 	config.ResetTokenExpireInSeconds = getEnvAsInt("RESET_TOKEN_EXPIRE_IN_SECONDS", 3600)
 	config.GoogleClientID = getEnv("GOOGLE_CLIENT_ID", "")
+
+	// The OIDC provider surface. It stays off until a client is
+	// configured: an is an api-key service first, an issuer second.
+	config.PublicBaseURL = strings.TrimSuffix(getEnv("PUBLIC_BASE_URL", ""), "/")
+	config.OidcClientID = getEnv("OIDC_CLIENT_ID", "")
+	config.OidcClientSecret = getEnv("OIDC_CLIENT_SECRET", "")
+	config.OidcCryptoKey = getEnv("OIDC_CRYPTO_KEY", "")
+	config.OidcRedirectURIs = getEnvAsStringSlice("OIDC_REDIRECT_URIS", []string{})
+	config.OidcPostLogoutRedirectURIs = getEnvAsStringSlice("OIDC_POST_LOGOUT_REDIRECT_URIS",
+		[]string{})
+	config.OidcAuthCodeExpireInSeconds = getEnvAsInt("OIDC_AUTH_CODE_EXPIRE_IN_SECONDS", 300)
+	config.OidcSessionExpireInSeconds = getEnvAsInt("OIDC_SESSION_EXPIRE_IN_SECONDS", 43200)
+	config.OidcInsecure = getEnv("OIDC_INSECURE", "false") == "true"
+	config.OidcEnabled = config.PublicBaseURL != "" && config.OidcClientID != "" &&
+		config.OidcClientSecret != "" && config.OidcCryptoKey != ""
 
 	return config, nil
 }

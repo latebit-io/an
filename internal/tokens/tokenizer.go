@@ -3,6 +3,7 @@ package tokens
 import (
 	"context"
 	"crypto/rsa"
+	"sync"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -37,6 +38,11 @@ type Tokenizer interface {
 	CreateRefreshToken(ctx context.Context, tenantID, email, clientID string) (string, *RefreshClaims, error)
 	ValidateAccessToken(ctx context.Context, token string) (*AccessClaims, error)
 	ValidateRefreshToken(ctx context.Context, token string) (*RefreshClaims, error)
+	// ReloadKeys re-reads the signing keys so a rotation takes effect
+	// without a restart. External relying parties verify against the
+	// published JWKS, so the issuer has to be able to roll a key while
+	// running.
+	ReloadKeys(ctx context.Context) error
 }
 
 type DefaultTokenizer struct {
@@ -46,45 +52,76 @@ type DefaultTokenizer struct {
 	accessExpiry  time.Duration
 	refreshExpiry time.Duration
 
+	service SigningKeyService
+
+	// keys guards the loaded key set: ReloadKeys swaps it under live
+	// signing and validation traffic.
+	keys       sync.RWMutex
 	signingKid string
 	signingKey *rsa.PrivateKey
 	publicKeys map[string]*rsa.PublicKey
 }
 
-// NewDefaultTokenizer loads and parses all signing keys once: signs with the
+// NewDefaultTokenizer loads and parses all signing keys: signs with the
 // latest key, validates against any known kid. Call after
-// SigningKeyService.Initialize.
+// SigningKeyService.Initialize. ReloadKeys picks up later rotations.
 func NewDefaultTokenizer(ctx context.Context, issuer, audience string, accessExpiryInSeconds,
 	refreshExpiryInSeconds int, service SigningKeyService) (Tokenizer, error) {
-	keys, err := service.Keys(ctx)
-	if err != nil {
-		return nil, err
-	}
-	if len(keys) == 0 {
-		return nil, NoSigningKeyError{}
-	}
-	publicKeys := make(map[string]*rsa.PublicKey, len(keys))
-	for _, key := range keys {
-		publicKey, err := parsePublicKey(key.PublicKeyPEM)
-		if err != nil {
-			return nil, err
-		}
-		publicKeys[key.Kid] = publicKey
-	}
-	latest := keys[len(keys)-1]
-	privateKey, err := parsePrivateKey(latest.PrivateKeyPEM)
-	if err != nil {
-		return nil, err
-	}
-	return &DefaultTokenizer{
+	tokenizer := &DefaultTokenizer{
 		issuer:        issuer,
 		audience:      audience,
 		accessExpiry:  time.Duration(accessExpiryInSeconds) * time.Second,
 		refreshExpiry: time.Duration(refreshExpiryInSeconds) * time.Second,
-		signingKid:    latest.Kid,
-		signingKey:    privateKey,
-		publicKeys:    publicKeys,
-	}, nil
+		service:       service,
+	}
+	if err := tokenizer.ReloadKeys(ctx); err != nil {
+		return nil, err
+	}
+	return tokenizer, nil
+}
+
+func (t *DefaultTokenizer) ReloadKeys(ctx context.Context) error {
+	keys, err := t.service.Keys(ctx)
+	if err != nil {
+		return err
+	}
+	if len(keys) == 0 {
+		return NoSigningKeyError{}
+	}
+	publicKeys := make(map[string]*rsa.PublicKey, len(keys))
+	for _, key := range keys {
+		publicKey, err := ParsePublicKey(key.PublicKeyPEM)
+		if err != nil {
+			return err
+		}
+		publicKeys[key.Kid] = publicKey
+	}
+	latest := keys[len(keys)-1]
+	privateKey, err := ParsePrivateKey(latest.PrivateKeyPEM)
+	if err != nil {
+		return err
+	}
+	t.keys.Lock()
+	defer t.keys.Unlock()
+	t.signingKid = latest.Kid
+	t.signingKey = privateKey
+	t.publicKeys = publicKeys
+	return nil
+}
+
+// signingKeyPair returns the current signing key under the read lock.
+func (t *DefaultTokenizer) signingKeyPair() (string, *rsa.PrivateKey) {
+	t.keys.RLock()
+	defer t.keys.RUnlock()
+	return t.signingKid, t.signingKey
+}
+
+// publicKey resolves a kid to its public key under the read lock.
+func (t *DefaultTokenizer) publicKey(kid string) (*rsa.PublicKey, bool) {
+	t.keys.RLock()
+	defer t.keys.RUnlock()
+	key, ok := t.publicKeys[kid]
+	return key, ok
 }
 
 func (t *DefaultTokenizer) CreateAccessToken(ctx context.Context, tenantID, email,
@@ -145,10 +182,11 @@ func (t *DefaultTokenizer) registeredClaims(email string, expiry time.Duration) 
 }
 
 func (t *DefaultTokenizer) sign(claims jwt.Claims, use string) (string, error) {
+	kid, signingKey := t.signingKeyPair()
 	token := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
-	token.Header["kid"] = t.signingKid
+	token.Header["kid"] = kid
 	token.Header["use"] = use
-	return token.SignedString(t.signingKey)
+	return token.SignedString(signingKey)
 }
 
 func (t *DefaultTokenizer) validate(tokenString, use string, claims jwt.Claims) error {
@@ -160,7 +198,7 @@ func (t *DefaultTokenizer) validate(tokenString, use string, claims jwt.Claims) 
 			return nil, TokenInvalidError{Reason: "wrong token use"}
 		}
 		kid, _ := token.Header["kid"].(string)
-		publicKey, ok := t.publicKeys[kid]
+		publicKey, ok := t.publicKey(kid)
 		if !ok {
 			return nil, TokenInvalidError{Reason: "unknown signing key"}
 		}

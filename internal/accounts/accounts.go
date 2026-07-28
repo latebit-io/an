@@ -13,6 +13,7 @@ type Account struct {
 	ID       string    `json:"id"`
 	TenantID string    `json:"tenantId"`
 	Email    string    `json:"email"`
+	Name     string    `json:"name,omitempty"`
 	Verified bool      `json:"verified"`
 	Enabled  bool      `json:"enabled"`
 	Deleted  bool      `json:"deleted"`
@@ -37,7 +38,10 @@ type ResetToken struct {
 }
 
 // SessionRevoker revokes all of an account's sessions; implemented by the
-// authn session repository and wired in main (consumer-side interface).
+// authn session repository and by the OIDC session revoker, both wired in
+// main (consumer-side interface). There is more than one because an account
+// can be signed in on more than one surface, and a credential change has to
+// end all of them or it has ended none of them.
 type SessionRevoker interface {
 	DeleteAll(ctx context.Context, tenantID, email string) error
 }
@@ -49,7 +53,10 @@ type LockoutClearer interface {
 }
 
 type AccountService interface {
-	Register(ctx context.Context, tenantID, email, password string) (*RegisteredAccount, error)
+	// Register takes an optional display name; it is the source of the
+	// OIDC name claim and is omitted from the id_token when empty.
+	Register(ctx context.Context, tenantID, email, password, name string) (*RegisteredAccount, error)
+	UpdateName(ctx context.Context, tenantID, email, name string) error
 	Verify(ctx context.Context, tenantID, email, token string) error
 	ResendVerification(ctx context.Context, tenantID, email string) (string, error)
 	Forgot(ctx context.Context, tenantID, email string) (*ResetToken, error)
@@ -61,7 +68,7 @@ type AccountService interface {
 type DefaultAccountService struct {
 	accounts     AccountRepository
 	resets       PasswordResetRepository
-	sessions     SessionRevoker
+	sessions     []SessionRevoker
 	lockouts     LockoutClearer
 	txManager    utils.TxManager
 	passwordCost int
@@ -69,7 +76,7 @@ type DefaultAccountService struct {
 }
 
 func NewDefaultAccountService(accounts AccountRepository, resets PasswordResetRepository,
-	sessions SessionRevoker, lockouts LockoutClearer, txManager utils.TxManager,
+	sessions []SessionRevoker, lockouts LockoutClearer, txManager utils.TxManager,
 	passwordCost int, resetExpiry time.Duration) AccountService {
 	return &DefaultAccountService{
 		accounts:     accounts,
@@ -82,9 +89,12 @@ func NewDefaultAccountService(accounts AccountRepository, resets PasswordResetRe
 	}
 }
 
-func (s *DefaultAccountService) Register(ctx context.Context, tenantID, email,
-	password string) (*RegisteredAccount, error) {
+func (s *DefaultAccountService) Register(ctx context.Context, tenantID, email, password,
+	name string) (*RegisteredAccount, error) {
 	if err := utils.ValidateEmail(email); err != nil {
+		return nil, InvalidAccountError{Value: err.Error()}
+	}
+	if err := utils.ValidateName(name); err != nil {
 		return nil, InvalidAccountError{Value: err.Error()}
 	}
 	if err := utils.ValidatePassword(password); err != nil {
@@ -101,6 +111,7 @@ func (s *DefaultAccountService) Register(ctx context.Context, tenantID, email,
 	account, err := s.accounts.Create(ctx, Account{
 		TenantID:         tenantID,
 		Email:            email,
+		Name:             name,
 		PasswordHash:     passwordHash,
 		VerificationHash: utils.Sha256Hex(verificationToken),
 	})
@@ -191,11 +202,23 @@ func (s *DefaultAccountService) Reset(ctx context.Context, tenantID, email, toke
 		if err := s.resets.Delete(ctx, tenantID, email); err != nil {
 			return err
 		}
-		if err := s.sessions.DeleteAll(ctx, tenantID, email); err != nil {
+		if err := s.revokeSessions(ctx, tenantID, email); err != nil {
 			return err
 		}
 		return s.lockouts.Clear(ctx, tenantID, email)
 	})
+}
+
+// UpdateName sets the display name behind the OIDC name claim. An empty
+// name clears it, which drops the claim rather than asserting it empty.
+func (s *DefaultAccountService) UpdateName(ctx context.Context, tenantID, email, name string) error {
+	if err := utils.ValidateName(name); err != nil {
+		return InvalidAccountError{Value: err.Error()}
+	}
+	if _, err := s.readLive(ctx, tenantID, email); err != nil {
+		return err
+	}
+	return s.accounts.UpdateName(ctx, tenantID, email, name)
 }
 
 func (s *DefaultAccountService) UpdatePassword(ctx context.Context, tenantID, email,
@@ -218,7 +241,27 @@ func (s *DefaultAccountService) UpdatePassword(ctx context.Context, tenantID, em
 	if err != nil {
 		return err
 	}
-	return s.accounts.UpdatePasswordHash(ctx, tenantID, email, passwordHash)
+	// One transaction, for the same reason a reset is one: a password that
+	// changed while the sessions opened under the old one stayed live has
+	// not really changed.
+	return s.txManager.WithTransaction(ctx, func(ctx context.Context) error {
+		if err := s.accounts.UpdatePasswordHash(ctx, tenantID, email, passwordHash); err != nil {
+			return err
+		}
+		return s.revokeSessions(ctx, tenantID, email)
+	})
+}
+
+// revokeSessions ends the account's sessions on every surface. One failure
+// fails the whole change: a partially revoked account is one the user
+// believes they have secured.
+func (s *DefaultAccountService) revokeSessions(ctx context.Context, tenantID, email string) error {
+	for _, revoker := range s.sessions {
+		if err := revoker.DeleteAll(ctx, tenantID, email); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *DefaultAccountService) Delete(ctx context.Context, tenantID, email string) error {
@@ -229,7 +272,7 @@ func (s *DefaultAccountService) Delete(ctx context.Context, tenantID, email stri
 		if err := s.accounts.SoftDelete(ctx, tenantID, email); err != nil {
 			return err
 		}
-		return s.sessions.DeleteAll(ctx, tenantID, email)
+		return s.revokeSessions(ctx, tenantID, email)
 	})
 }
 

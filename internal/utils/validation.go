@@ -33,6 +33,15 @@ func ValidateEmail(email string) error {
 	return nil
 }
 
+// ValidateName bounds the optional display name behind the OIDC name
+// claim. Empty is valid: the claim is then omitted.
+func ValidateName(name string) error {
+	if len(name) > 128 {
+		return errors.New("name must be at most 128 characters")
+	}
+	return nil
+}
+
 // ValidateUUID validates a uuid identifier.
 func ValidateUUID(id string) error {
 	if _, err := uuid.Parse(id); err != nil {

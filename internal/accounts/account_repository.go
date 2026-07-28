@@ -19,9 +19,12 @@ type AccountRepository interface {
 	// the provider already asserted the email).
 	CreateVerified(ctx context.Context, account Account) (*Account, error)
 	Read(ctx context.Context, tenantID, email string) (*Account, error)
+	// ReadByID resolves an account by its id, which is the OIDC subject.
+	ReadByID(ctx context.Context, tenantID, id string) (*Account, error)
 	SetVerified(ctx context.Context, tenantID, email string) error
 	UpdateVerificationHash(ctx context.Context, tenantID, email, hash string) error
 	UpdatePasswordHash(ctx context.Context, tenantID, email, hash string) error
+	UpdateName(ctx context.Context, tenantID, email, name string) error
 	SoftDelete(ctx context.Context, tenantID, email string) error
 }
 
@@ -55,9 +58,10 @@ func (r *PostgresAccountRepository) create(ctx context.Context, account Account,
 		verificationHash = &account.VerificationHash
 	}
 	err = querier.QueryRow(ctx,
-		`INSERT INTO accounts (id, tenant_id, email, password_hash, verified, verification_hash)
-		 VALUES ($1, $2, $3, $4, $5, $6) RETURNING enabled, deleted, created, modified`,
-		account.ID, account.TenantID, account.Email, account.PasswordHash, verified, verificationHash).
+		`INSERT INTO accounts (id, tenant_id, email, password_hash, verified, verification_hash, name)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING enabled, deleted, created, modified`,
+		account.ID, account.TenantID, account.Email, account.PasswordHash, verified, verificationHash,
+		nullableName(account.Name)).
 		Scan(&account.Enabled, &account.Deleted, &account.Created, &account.Modified)
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && pgErr.Code == pgUniqueViolation {
@@ -70,23 +74,42 @@ func (r *PostgresAccountRepository) create(ctx context.Context, account Account,
 }
 
 func (r *PostgresAccountRepository) Read(ctx context.Context, tenantID, email string) (*Account, error) {
+	return r.read(ctx, "email = $2", tenantID, email, email)
+}
+
+func (r *PostgresAccountRepository) ReadByID(ctx context.Context, tenantID, id string) (*Account, error) {
+	// A malformed id is a miss, not a postgres uuid cast error.
+	if _, err := uuid.Parse(id); err != nil {
+		return nil, AccountNotFoundError{Value: id}
+	}
+	return r.read(ctx, "id = $2", tenantID, id, id)
+}
+
+// read loads one account by whichever key the caller selects; notFound is
+// the value echoed back in AccountNotFoundError.
+func (r *PostgresAccountRepository) read(ctx context.Context, predicate, tenantID, key,
+	notFound string) (*Account, error) {
 	querier := utils.QuerierFrom(ctx, r.pool)
 	var account Account
-	var verificationHash *string
+	var verificationHash, name *string
 	err := querier.QueryRow(ctx,
-		`SELECT id, tenant_id, email, password_hash, verified, verification_hash, enabled, deleted,
-		        created, modified
-		 FROM accounts WHERE tenant_id = $1 AND email = $2`, tenantID, email).
+		`SELECT id, tenant_id, email, password_hash, verified, verification_hash, name, enabled,
+		        deleted, created, modified
+		 FROM accounts WHERE tenant_id = $1 AND `+predicate, tenantID, key).
 		Scan(&account.ID, &account.TenantID, &account.Email, &account.PasswordHash, &account.Verified,
-			&verificationHash, &account.Enabled, &account.Deleted, &account.Created, &account.Modified)
+			&verificationHash, &name, &account.Enabled, &account.Deleted, &account.Created,
+			&account.Modified)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, AccountNotFoundError{Value: email}
+		return nil, AccountNotFoundError{Value: notFound}
 	}
 	if err != nil {
 		return nil, err
 	}
 	if verificationHash != nil {
 		account.VerificationHash = *verificationHash
+	}
+	if name != nil {
+		account.Name = *name
 	}
 	return &account, nil
 }
@@ -111,10 +134,26 @@ func (r *PostgresAccountRepository) UpdatePasswordHash(ctx context.Context, tena
 		tenantID, email, hash)
 }
 
+func (r *PostgresAccountRepository) UpdateName(ctx context.Context, tenantID, email,
+	name string) error {
+	return r.update(ctx,
+		"UPDATE accounts SET name = $3, modified = now() WHERE tenant_id = $1 AND email = $2",
+		tenantID, email, nullableName(name))
+}
+
 func (r *PostgresAccountRepository) SoftDelete(ctx context.Context, tenantID, email string) error {
 	return r.update(ctx,
 		"UPDATE accounts SET deleted = true, modified = now() WHERE tenant_id = $1 AND email = $2",
 		tenantID, email)
+}
+
+// nullableName keeps an unset name NULL rather than an empty string, so the
+// name claim is omitted instead of asserted empty.
+func nullableName(name string) *string {
+	if name == "" {
+		return nil
+	}
+	return &name
 }
 
 func (r *PostgresAccountRepository) update(ctx context.Context, sql string, tenantID, email string,

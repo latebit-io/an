@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"flag"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/joho/godotenv"
 	"github.com/labstack/echo/v5"
 	"github.com/labstack/echo/v5/middleware"
@@ -21,10 +23,12 @@ import (
 	authenticateapi "github.com/latebit-io/an/api/authenticate"
 	"github.com/latebit-io/an/api/health"
 	jwksapi "github.com/latebit-io/an/api/jwks"
+	oidcapi "github.com/latebit-io/an/api/oidc"
 	"github.com/latebit-io/an/internal/accounts"
 	"github.com/latebit-io/an/internal/apikeys"
 	"github.com/latebit-io/an/internal/authn"
 	"github.com/latebit-io/an/internal/db"
+	oidcinternal "github.com/latebit-io/an/internal/oidc"
 	"github.com/latebit-io/an/internal/social"
 	"github.com/latebit-io/an/internal/tenants"
 	"github.com/latebit-io/an/internal/tokens"
@@ -98,8 +102,17 @@ func main() {
 	failedAttemptRepository := authn.NewPostgresFailedAttemptRepository(pool)
 	accountRepository := accounts.NewPostgresAccountRepository(pool)
 	passwordResetRepository := accounts.NewPostgresPasswordResetRepository(pool)
+	// Every surface an account can be signed in on has to be revocable
+	// together: a credential change that ends the api-key sessions but
+	// leaves the OIDC ones live has not ended anything.
+	revokers := []accounts.SessionRevoker{sessionRepository}
+	if config.OidcEnabled {
+		revokers = append(revokers, oidcinternal.NewSessionRevoker(
+			oidcinternal.NewPostgresBrowserSessionRepository(pool),
+			oidcinternal.NewPostgresTokenRepository(pool)))
+	}
 	accountService := accounts.NewDefaultAccountService(accountRepository, passwordResetRepository,
-		sessionRepository, failedAttemptRepository, txManager, config.PasswordCost,
+		revokers, failedAttemptRepository, txManager, config.PasswordCost,
 		time.Duration(config.ResetTokenExpireInSeconds)*time.Second)
 	accountHandler := accountsapi.NewAccountHandler(accountService)
 	accountsapi.AccountRoutes(service, accountHandler, ratelimiter)
@@ -132,11 +145,17 @@ func main() {
 	apiKeyHandler := apikeysapi.NewApiKeyHandler(apiKeyService)
 	apikeysapi.ApiKeyRoutes(service, apiKeyHandler, ratelimiter)
 
+	oidcRepositories, err := oidcSetting(ctx, service, config, pool, accountRepository,
+		signingKeyService, authenticationService, logger)
+	if err != nil {
+		panic(err)
+	}
+
 	corsSetting(service, config, logger)
 	apiKeySetting(service, config, apiKeyService, logger)
 
-	go janitor(ctx, logger, sessionRepository, logonCodeRepository, passwordResetRepository,
-		failedAttemptRepository)
+	go janitor(ctx, logger, tokenizer, sessionRepository, logonCodeRepository,
+		passwordResetRepository, failedAttemptRepository, oidcRepositories)
 
 	healthHandler := health.NewHealthHandler()
 	health.HealthRoutes(service, healthHandler)
@@ -152,11 +171,13 @@ func main() {
 }
 
 // janitor deletes expired sessions, logon codes and reset tokens hourly
-// (expiry is enforced on read; this only reclaims dead rows) and drops
-// failed-attempt rows untouched for a day.
-func janitor(ctx context.Context, logger *slog.Logger, sessions authn.SessionRepository,
-	codes authn.LogonCodeRepository, resets accounts.PasswordResetRepository,
-	attempts authn.FailedAttemptRepository) {
+// (expiry is enforced on read; this only reclaims dead rows), drops
+// failed-attempt rows untouched for a day, and re-reads the signing keys so
+// a rotation reaches a running service.
+func janitor(ctx context.Context, logger *slog.Logger, tokenizer tokens.Tokenizer,
+	sessions authn.SessionRepository, codes authn.LogonCodeRepository,
+	resets accounts.PasswordResetRepository, attempts authn.FailedAttemptRepository,
+	oidcRepositories *oidcRepositories) {
 	ticker := time.NewTicker(time.Hour)
 	defer ticker.Stop()
 	for {
@@ -165,6 +186,10 @@ func janitor(ctx context.Context, logger *slog.Logger, sessions authn.SessionRep
 			return
 		case <-ticker.C:
 		}
+		if err := tokenizer.ReloadKeys(ctx); err != nil {
+			logger.Error("janitor: signing keys", "error", err)
+		}
+		oidcRepositories.reloadKeys(ctx, logger)
 		expiredSessions, err := sessions.DeleteExpired(ctx)
 		if err != nil {
 			logger.Error("janitor: sessions", "error", err)
@@ -181,8 +206,9 @@ func janitor(ctx context.Context, logger *slog.Logger, sessions authn.SessionRep
 		if err != nil {
 			logger.Error("janitor: failed attempts", "error", err)
 		}
+		expiredOidc := oidcRepositories.deleteExpired(ctx, logger)
 		logger.Info("janitor swept", "sessions", expiredSessions, "logonCodes", expiredCodes,
-			"passwordResets", expiredResets, "failedAttempts", staleAttempts)
+			"passwordResets", expiredResets, "failedAttempts", staleAttempts, "oidc", expiredOidc)
 	}
 }
 
@@ -226,6 +252,126 @@ func apiKeySetting(service *echo.Echo, config *AppConfig, apiKeyService apikeys.
 		logger.Warn("BOOTSTRAP_API_KEY not set — api key auth is DISABLED, all endpoints are open")
 		return
 	}
-	service.Use(auth.Middleware(apiKeyService, config.BootstrapApiKey))
+	// The OIDC surface is exempt: browsers and relying parties cannot send
+	// an api key, so those routes authenticate the client or the user.
+	public := []auth.PublicPath{}
+	if config.OidcEnabled {
+		public = append(public, oidcapi.IsProviderPath)
+	}
+	service.Use(auth.Middleware(apiKeyService, config.BootstrapApiKey, public...))
 	logger.Info("api key auth enabled")
+}
+
+// oidcRepositories groups the OIDC stores so the janitor can sweep them.
+// It is nil when the provider surface is off.
+type oidcRepositories struct {
+	authRequests oidcinternal.AuthRequestRepository
+	tokens       oidcinternal.TokenRepository
+	sessions     oidcinternal.BrowserSessionRepository
+	storage      *oidcinternal.Storage
+}
+
+// reloadKeys re-reads the signing keys the provider caches, so a rotation
+// reaches the OIDC surface on the same sweep it reaches the api-key one.
+func (r *oidcRepositories) reloadKeys(ctx context.Context, logger *slog.Logger) {
+	if r == nil {
+		return
+	}
+	if err := r.storage.ReloadKeys(ctx); err != nil {
+		logger.Error("janitor: oidc signing keys", "error", err)
+	}
+}
+
+func (r *oidcRepositories) deleteExpired(ctx context.Context, logger *slog.Logger) int64 {
+	if r == nil {
+		return 0
+	}
+	var swept int64
+	expiredRequests, err := r.authRequests.DeleteExpired(ctx)
+	if err != nil {
+		logger.Error("janitor: oidc auth requests", "error", err)
+	}
+	swept += expiredRequests
+	expiredTokens, err := r.tokens.DeleteExpired(ctx)
+	if err != nil {
+		logger.Error("janitor: oidc tokens", "error", err)
+	}
+	swept += expiredTokens
+	expiredSessions, err := r.sessions.DeleteExpired(ctx)
+	if err != nil {
+		logger.Error("janitor: oidc browser sessions", "error", err)
+	}
+	return swept + expiredSessions
+}
+
+// oidcSetting mounts the OIDC provider surface when it is configured. The
+// service runs without it: an is an api-key service that also speaks OIDC,
+// not the other way round.
+func oidcSetting(ctx context.Context, service *echo.Echo, config *AppConfig, pool *pgxpool.Pool,
+	accountRepository accounts.AccountRepository, signingKeys tokens.SigningKeyService,
+	authentication authn.AuthenticationService, logger *slog.Logger) (*oidcRepositories, error) {
+	if !config.OidcEnabled {
+		logger.Info("oidc provider disabled",
+			"reason", "PUBLIC_BASE_URL, OIDC_CLIENT_ID, OIDC_CLIENT_SECRET and OIDC_CRYPTO_KEY are all required")
+		return nil, nil
+	}
+	cryptoKey := sha256.Sum256([]byte(config.OidcCryptoKey))
+
+	authRequestRepository := oidcinternal.NewPostgresAuthRequestRepository(pool)
+	tokenRepository := oidcinternal.NewPostgresTokenRepository(pool)
+	browserSessionRepository := oidcinternal.NewPostgresBrowserSessionRepository(pool)
+
+	registry := oidcinternal.NewStaticClientRegistry(&oidcinternal.StaticClient{
+		ID:                     config.OidcClientID,
+		SecretHash:             utils.Sha256Hex(config.OidcClientSecret),
+		RedirectURIs:           config.OidcRedirectURIs,
+		PostLogoutRedirectURIs: config.OidcPostLogoutRedirectURIs,
+		FirstParty:             true,
+		IDTokenLifetime:        time.Duration(config.AccessTokenExpireInSeconds) * time.Second,
+		ClockSkewTolerance:     0,
+	})
+
+	storage := oidcinternal.NewStorage(authRequestRepository, tokenRepository, accountRepository,
+		signingKeys, registry,
+		func(tenantID, authRequestID string) string {
+			return oidcapi.LoginURL(config.PublicBaseURL, tenantID, authRequestID)
+		},
+		time.Duration(config.OidcAuthCodeExpireInSeconds)*time.Second,
+		time.Duration(config.AccessTokenExpireInSeconds)*time.Second,
+		time.Duration(config.RefreshTokenExpireInSeconds)*time.Second)
+
+	if err := storage.ReloadKeys(ctx); err != nil {
+		return nil, err
+	}
+
+	provider, err := oidcapi.NewProvider(storage, oidcapi.ProviderConfig{
+		PublicBaseURL: config.PublicBaseURL,
+		CryptoKey:     cryptoKey,
+		Insecure:      config.OidcInsecure,
+	})
+	if err != nil {
+		return nil, err
+	}
+	loginHandler, err := oidcapi.NewLoginHandler(storage, browserSessionRepository, authentication,
+		accountRepository, registry, provider, config.PublicBaseURL, !config.OidcInsecure,
+		time.Duration(config.OidcSessionExpireInSeconds)*time.Second)
+	if err != nil {
+		return nil, err
+	}
+	// The OIDC routes face public traffic, so they get their own limiter
+	// bucket instead of sharing the service-wide budget.
+	oidcLimiter := middleware.RateLimiter(
+		middleware.NewRateLimiterMemoryStore(float64(config.RequestsPerSecond)))
+	oidcapi.OidcRoutes(service, provider, loginHandler, config.PublicBaseURL, oidcLimiter)
+
+	logger.Info("oidc provider enabled", "issuer", oidcapi.Issuer(config.PublicBaseURL, config.DefaultTenantID))
+	if config.OidcInsecure {
+		logger.Warn("OIDC_INSECURE is set — http issuers allowed and cookies are not Secure, development only")
+	}
+	return &oidcRepositories{
+		authRequests: authRequestRepository,
+		tokens:       tokenRepository,
+		sessions:     browserSessionRepository,
+		storage:      storage,
+	}, nil
 }

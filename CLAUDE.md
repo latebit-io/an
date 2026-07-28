@@ -9,8 +9,11 @@ an is a micro authentication service: JWT authn (RS256), multi-tenant, extracted
 from BulwarkAuth and kept deliberately minimal. Its sibling az handles
 authorization. an sends no email — verification tokens, reset tokens and magic
 logon codes are returned in API responses and the calling backend delivers them.
-Every endpoint except `/health` and `/.well-known/` is api-key gated
-(`X-AN-API-KEY`), so the service is strictly server-to-server.
+On the api surface every endpoint except `/health` and `/.well-known/` is
+api-key gated (`X-AN-API-KEY`), so that surface is strictly
+server-to-server. The OIDC provider surface under `/t/<tenantId>/` is the
+documented exception: those routes are browser and relying-party facing and
+cannot carry an api key.
 
 Stack: Go 1.26, Echo v5, PostgreSQL via pgx/v5, slog (JSON), godotenv,
 RFC 7807 problem details. Mirrors az's structure and conventions.
@@ -32,10 +35,10 @@ RFC 7807 problem details. Mirrors az's structure and conventions.
 
 Domains: `tenants` (bootstrap only, no API), `apikeys` (`ank_` prefix, sha256
 at rest, bootstrap-key-only management), `tokens` (signing keys, tokenizer,
-JWKS), `accounts` (register/verify/forgot/reset/password/delete),
+JWKS), `accounts` (register/verify/forgot/reset/password/name/delete),
 `authn` (password logon, sessions per (tenant, email, clientId), atomic
 lockout, magic logon codes), `social` (validator interface, Google via
-go-oidc).
+go-oidc), `oidc` (OpenID provider surface on zitadel/oidc `op`).
 
 ## Key invariants
 
@@ -51,6 +54,17 @@ go-oidc).
   only in the minting response.
 - Social accounts are born verified (provider must assert `email_verified`).
 - No roles claim in JWTs — az owns authorization.
+- OIDC `sub` is the account id (UUIDv7), never the email. Relying parties
+  key their user tables on it, so it can never change.
+- OIDC access tokens are opaque, not JWTs: `AUDIENCE` is one global value
+  and cannot express a per-client `aud`. Only the `id_token` is signed.
+- The OIDC issuer carries the tenant (`<PUBLIC_BASE_URL>/t/<tenantId>`) from
+  day one; an issuer URL cannot change after a client is registered.
+- OIDC grants are one row each (`oidc_refresh_tokens`), unlike `sessions`
+  which is one row per (tenant, email, clientId). Two browsers, two grants.
+- Tokens from `/token` are live on return: the acknowledge step belongs to
+  the api-key surface and has no place in a code flow.
+- The provider library is confined to `internal/oidc` and `api/oidc`.
 - Unknown account on logon fails exactly like a wrong password (generic 401).
 
 ## Coding standards

@@ -9,5 +9,6 @@ func AccountRoutes(e *echo.Echo, handler AccountHandler, middleware ...echo.Midd
 	e.POST("/api/accounts/forgot", handler.Forgot, middleware...)
 	e.POST("/api/accounts/reset", handler.Reset, middleware...)
 	e.PUT("/api/accounts/password", handler.UpdatePassword, middleware...)
+	e.PUT("/api/accounts/name", handler.UpdateName, middleware...)
 	e.PUT("/api/accounts/delete", handler.Delete, middleware...)
 }
