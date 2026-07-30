@@ -321,7 +321,7 @@ func oidcSetting(ctx context.Context, service *echo.Echo, config *AppConfig, poo
 	tokenRepository := oidcinternal.NewPostgresTokenRepository(pool)
 	browserSessionRepository := oidcinternal.NewPostgresBrowserSessionRepository(pool)
 
-	registry := oidcinternal.NewStaticClientRegistry(&oidcinternal.StaticClient{
+	configured := oidcinternal.NewStaticClientRegistry(&oidcinternal.StaticClient{
 		ID:                     config.OidcClientID,
 		SecretHash:             utils.Sha256Hex(config.OidcClientSecret),
 		RedirectURIs:           config.OidcRedirectURIs,
@@ -330,6 +330,15 @@ func oidcSetting(ctx context.Context, service *echo.Echo, config *AppConfig, poo
 		IDTokenLifetime:        time.Duration(config.AccessTokenExpireInSeconds) * time.Second,
 		ClockSkewTolerance:     0,
 	})
+	// Clients registered through the admin API resolve behind the configured
+	// one, so a deployment that names a single client in its environment keeps
+	// working and nothing has to be migrated into the table.
+	clientRepository := oidcinternal.NewPostgresClientRepository(pool)
+	registry := oidcinternal.NewRegistryClientRegistry(configured, clientRepository)
+
+	// Registering a client mints a credential, so it sits with accounts and
+	// api keys behind the bootstrap key rather than on the provider surface.
+	oidcapi.ClientRoutes(service, oidcapi.NewClientHandler(clientRepository, config.OidcClientID))
 
 	storage := oidcinternal.NewStorage(authRequestRepository, tokenRepository, accountRepository,
 		signingKeys, registry,
