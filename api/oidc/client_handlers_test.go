@@ -116,7 +116,8 @@ func TestClientIDIsStoredTrimmed(t *testing.T) {
 
 	body := `{"tenantId":"acme","clientId":"  broker-a  ",` +
 		`"redirectUris":["https://broker.acme.demarkus.io/auth/callback"]}`
-	request := httptest.NewRequest(http.MethodPost, "/api/oidc/clients", strings.NewReader(body))
+	request := httptest.NewRequestWithContext(t.Context(), http.MethodPost,
+		"/api/oidc/clients", strings.NewReader(body))
 	request.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 	recorder := httptest.NewRecorder()
 	c := echo.New().NewContext(request, recorder)
