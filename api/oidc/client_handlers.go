@@ -2,7 +2,10 @@ package oidc
 
 import (
 	"errors"
+	"fmt"
+	"net"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/labstack/echo/v5"
@@ -18,10 +21,15 @@ import (
 // does not lock out the fleet.
 type ClientHandler struct {
 	clients oidcinternal.ClientRepository
+	// reserved is the id of the configured client. The registry resolves it
+	// first, so a registration under the same id would be handed a secret
+	// that never authenticates and would shadow the deployment's own client
+	// for every tenant.
+	reserved string
 }
 
-func NewClientHandler(clients oidcinternal.ClientRepository) ClientHandler {
-	return ClientHandler{clients: clients}
+func NewClientHandler(clients oidcinternal.ClientRepository, reserved string) ClientHandler {
+	return ClientHandler{clients: clients, reserved: reserved}
 }
 
 type CreateClientRequest struct {
@@ -59,7 +67,7 @@ func (ch ClientHandler) Create(c *echo.Context) error {
 		httpError := problem.NewBadRequest(err)
 		return c.JSON(httpError.Status, httpError)
 	}
-	if err := validateClient(request); err != nil {
+	if err := ch.validateClient(request); err != nil {
 		httpError := problem.NewBadRequest(err)
 		return c.JSON(httpError.Status, httpError)
 	}
@@ -108,21 +116,62 @@ func (ch ClientHandler) Delete(c *echo.Context) error {
 	return c.NoContent(http.StatusNoContent)
 }
 
-// validateClient refuses a client that could never complete a login, so the
-// failure lands at registration rather than at a tenant's first sign-in.
-func validateClient(request *CreateClientRequest) error {
-	if strings.TrimSpace(request.ClientID) == "" {
+// validateClient refuses a client that could never complete a login, or one
+// that would be shadowed, so the failure lands at registration rather than at
+// a tenant's first sign-in.
+func (ch ClientHandler) validateClient(request *CreateClientRequest) error {
+	clientID := strings.TrimSpace(request.ClientID)
+	if clientID == "" {
 		return errors.New("clientId is required")
+	}
+	if ch.reserved != "" && clientID == ch.reserved {
+		return errors.New("clientId is reserved by the configured client")
 	}
 	if len(request.RedirectURIs) == 0 {
 		return errors.New("at least one redirectUri is required")
 	}
 	for _, uri := range request.RedirectURIs {
-		if !strings.HasPrefix(uri, "https://") && !strings.HasPrefix(uri, "http://") {
-			return errors.New("redirectUris must be absolute URLs")
+		if err := validateRedirectURI("redirectUris", uri); err != nil {
+			return err
+		}
+	}
+	for _, uri := range request.PostLogoutRedirectURIs {
+		if err := validateRedirectURI("postLogoutRedirectUris", uri); err != nil {
+			return err
 		}
 	}
 	return nil
+}
+
+// validateRedirectURI parses rather than prefix-matches: "https://" passes a
+// prefix check and is not a URL anyone can be sent to. Plaintext is refused
+// because an authorization code delivered over http is a code on the wire,
+// with loopback the one exception a local run needs.
+func validateRedirectURI(field, uri string) error {
+	parsed, err := url.Parse(uri)
+	if err != nil || parsed.Host == "" {
+		return fmt.Errorf("%s must be absolute URLs with a host", field)
+	}
+	switch parsed.Scheme {
+	case "https":
+		return nil
+	case "http":
+		if isLoopback(parsed.Hostname()) {
+			return nil
+		}
+		return fmt.Errorf("%s must be https except on loopback", field)
+	}
+	return fmt.Errorf("%s must be https", field)
+}
+
+func isLoopback(host string) bool {
+	if host == "localhost" {
+		return true
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback()
+	}
+	return false
 }
 
 func clientProblem(c *echo.Context, err error) error {

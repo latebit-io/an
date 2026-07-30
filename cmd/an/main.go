@@ -338,7 +338,7 @@ func oidcSetting(ctx context.Context, service *echo.Echo, config *AppConfig, poo
 
 	// Registering a client mints a credential, so it sits with accounts and
 	// api keys behind the bootstrap key rather than on the provider surface.
-	oidcapi.ClientRoutes(service, oidcapi.NewClientHandler(clientRepository))
+	oidcapi.ClientRoutes(service, oidcapi.NewClientHandler(clientRepository, config.OidcClientID))
 
 	storage := oidcinternal.NewStorage(authRequestRepository, tokenRepository, accountRepository,
 		signingKeys, registry,
