@@ -1,7 +1,14 @@
 package oidc
 
 import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
+
+	"github.com/labstack/echo/v5"
+	oidcinternal "github.com/latebit-io/an/internal/oidc"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -81,15 +88,44 @@ func TestRedirectURIIsRequired(t *testing.T) {
 	assert.Error(t, err)
 }
 
+// recordingClients captures what the handler asked the repository to store.
+type recordingClients struct {
+	created oidcinternal.RegisteredClient
+}
+
+func (r *recordingClients) Create(_ context.Context,
+	client oidcinternal.RegisteredClient) (*oidcinternal.RegisteredClient, string, error) {
+	r.created = client
+	return &client, "secret", nil
+}
+
+func (r *recordingClients) Read(context.Context, string, string) (*oidcinternal.RegisteredClient, error) {
+	return nil, oidcinternal.ClientNotFoundError{}
+}
+
+func (r *recordingClients) Delete(context.Context, string, string) error { return nil }
+
 // A padded id passes a trimmed check; storing the raw value would register a
 // client under a name neither the caller nor the registry resolves.
+//
+// Driven through Create rather than the validator, because what matters is
+// which value reaches the repository.
 func TestClientIDIsStoredTrimmed(t *testing.T) {
-	handler := NewClientHandler(nil, "console")
+	clients := &recordingClients{}
+	handler := NewClientHandler(clients, "console")
 
-	clientID, err := handler.validateClient(&CreateClientRequest{
-		ClientID:     "  broker-a  ",
-		RedirectURIs: []string{"https://broker.acme.demarkus.io/auth/callback"},
-	})
-	require.NoError(t, err)
-	assert.Equal(t, "broker-a", clientID)
+	body := `{"tenantId":"acme","clientId":"  broker-a  ",` +
+		`"redirectUris":["https://broker.acme.demarkus.io/auth/callback"]}`
+	request := httptest.NewRequest(http.MethodPost, "/api/oidc/clients", strings.NewReader(body))
+	request.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+	recorder := httptest.NewRecorder()
+	c := echo.New().NewContext(request, recorder)
+	// The keys api/auth sets once a bootstrap key has authenticated.
+	c.Set("an.root", true)
+
+	require.NoError(t, handler.Create(c))
+	assert.Equal(t, http.StatusCreated, recorder.Code)
+	assert.Equal(t, "broker-a", clients.created.ClientID)
+	assert.Equal(t, "acme", clients.created.TenantID)
+	assert.True(t, clients.created.FirstParty)
 }
