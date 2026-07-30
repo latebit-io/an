@@ -152,6 +152,12 @@ func validateRedirectURI(field, uri string) error {
 	if err != nil || parsed.Host == "" {
 		return fmt.Errorf("%s must be absolute URLs with a host", field)
 	}
+	// RFC 6749 section 3.1.2: a redirection endpoint carries no fragment.
+	// Checked on the raw value because a bare trailing "#" parses to an empty
+	// fragment and would otherwise pass.
+	if strings.Contains(uri, "#") {
+		return fmt.Errorf("%s must not contain a fragment", field)
+	}
 	switch parsed.Scheme {
 	case "https":
 		return nil

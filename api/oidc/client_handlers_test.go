@@ -38,6 +38,8 @@ func TestRedirectURIsAreParsedNotPrefixMatched(t *testing.T) {
 		{"loopback plaintext", "http://localhost:8080/auth/callback", true},
 		{"loopback address", "http://127.0.0.1:8080/auth/callback", true},
 		{"other scheme", "ftp://broker.acme.demarkus.io/", false},
+		{"fragment", "https://broker.acme.demarkus.io/auth/callback#state", false},
+		{"empty fragment", "https://broker.acme.demarkus.io/auth/callback#", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
