@@ -13,7 +13,7 @@ import (
 func TestReservedClientIDIsRefused(t *testing.T) {
 	handler := NewClientHandler(nil, "console")
 
-	err := handler.validateClient(&CreateClientRequest{
+	_, err := handler.validateClient(&CreateClientRequest{
 		ClientID:     "console",
 		RedirectURIs: []string{"https://console.demarkus.io/auth/callback"},
 	})
@@ -43,7 +43,7 @@ func TestRedirectURIsAreParsedNotPrefixMatched(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			err := handler.validateClient(&CreateClientRequest{
+			_, err := handler.validateClient(&CreateClientRequest{
 				ClientID: "broker-a", RedirectURIs: []string{tc.uri},
 			})
 			if tc.ok {
@@ -60,7 +60,7 @@ func TestRedirectURIsAreParsedNotPrefixMatched(t *testing.T) {
 func TestPostLogoutRedirectURIsAreValidated(t *testing.T) {
 	handler := NewClientHandler(nil, "console")
 
-	err := handler.validateClient(&CreateClientRequest{
+	_, err := handler.validateClient(&CreateClientRequest{
 		ClientID:               "broker-b",
 		RedirectURIs:           []string{"https://broker.acme.demarkus.io/auth/callback"},
 		PostLogoutRedirectURIs: []string{"http://phisher.example.com/"},
@@ -72,9 +72,24 @@ func TestPostLogoutRedirectURIsAreValidated(t *testing.T) {
 func TestRedirectURIIsRequired(t *testing.T) {
 	handler := NewClientHandler(nil, "console")
 
-	assert.Error(t, handler.validateClient(&CreateClientRequest{ClientID: "broker-c"}))
-	assert.Error(t, handler.validateClient(&CreateClientRequest{
+	_, err := handler.validateClient(&CreateClientRequest{ClientID: "broker-c"})
+	assert.Error(t, err)
+	_, err = handler.validateClient(&CreateClientRequest{
 		ClientID:     "   ",
 		RedirectURIs: []string{"https://broker.acme.demarkus.io/auth/callback"},
-	}))
+	})
+	assert.Error(t, err)
+}
+
+// A padded id passes a trimmed check; storing the raw value would register a
+// client under a name neither the caller nor the registry resolves.
+func TestClientIDIsStoredTrimmed(t *testing.T) {
+	handler := NewClientHandler(nil, "console")
+
+	clientID, err := handler.validateClient(&CreateClientRequest{
+		ClientID:     "  broker-a  ",
+		RedirectURIs: []string{"https://broker.acme.demarkus.io/auth/callback"},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "broker-a", clientID)
 }

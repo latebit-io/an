@@ -67,14 +67,17 @@ func (ch ClientHandler) Create(c *echo.Context) error {
 		httpError := problem.NewBadRequest(err)
 		return c.JSON(httpError.Status, httpError)
 	}
-	if err := ch.validateClient(request); err != nil {
+	clientID, err := ch.validateClient(request)
+	if err != nil {
 		httpError := problem.NewBadRequest(err)
 		return c.JSON(httpError.Status, httpError)
 	}
 
 	created, secret, err := ch.clients.Create(c.Request().Context(), oidcinternal.RegisteredClient{
-		TenantID:               auth.EffectiveTenant(c, request.TenantID),
-		ClientID:               request.ClientID,
+		TenantID: auth.EffectiveTenant(c, request.TenantID),
+		// The validated id, not the raw one: " console " passes a trimmed
+		// check and would then be stored padded, resolving as neither.
+		ClientID:               clientID,
 		RedirectURIs:           request.RedirectURIs,
 		PostLogoutRedirectURIs: request.PostLogoutRedirectURIs,
 		// Every client registered this way is one of ours. A third party
@@ -118,29 +121,31 @@ func (ch ClientHandler) Delete(c *echo.Context) error {
 
 // validateClient refuses a client that could never complete a login, or one
 // that would be shadowed, so the failure lands at registration rather than at
-// a tenant's first sign-in.
-func (ch ClientHandler) validateClient(request *CreateClientRequest) error {
+// a tenant's first sign-in. It returns the id to store: validating a trimmed
+// value and persisting the raw one is how a client ends up registered under a
+// name that resolves as neither.
+func (ch ClientHandler) validateClient(request *CreateClientRequest) (string, error) {
 	clientID := strings.TrimSpace(request.ClientID)
 	if clientID == "" {
-		return errors.New("clientId is required")
+		return "", errors.New("clientId is required")
 	}
 	if ch.reserved != "" && clientID == ch.reserved {
-		return errors.New("clientId is reserved by the configured client")
+		return "", errors.New("clientId is reserved by the configured client")
 	}
 	if len(request.RedirectURIs) == 0 {
-		return errors.New("at least one redirectUri is required")
+		return "", errors.New("at least one redirectUri is required")
 	}
 	for _, uri := range request.RedirectURIs {
 		if err := validateRedirectURI("redirectUris", uri); err != nil {
-			return err
+			return "", err
 		}
 	}
 	for _, uri := range request.PostLogoutRedirectURIs {
 		if err := validateRedirectURI("postLogoutRedirectUris", uri); err != nil {
-			return err
+			return "", err
 		}
 	}
-	return nil
+	return clientID, nil
 }
 
 // validateRedirectURI parses rather than prefix-matches: "https://" passes a
