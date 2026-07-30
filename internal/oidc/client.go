@@ -157,3 +157,85 @@ func (c *providerClient) RestrictAdditionalIdTokenScopes() func(scopes []string)
 func (c *providerClient) RestrictAdditionalAccessTokenScopes() func(scopes []string) []string {
 	return func(scopes []string) []string { return scopes }
 }
+
+// RegistryClientRegistry resolves clients from the database, falling back to
+// a configured one. Composed rather than replacing it: the deployment's own
+// client is configuration, and a registry that had to be seeded before the
+// service could serve its first login is a worse bootstrap than an
+// environment variable.
+//
+// The configured client is checked first and is not tenant-scoped, which is
+// what it already was. Registered clients are, so a client id from one tenant
+// cannot authenticate against another.
+type RegistryClientRegistry struct {
+	configured ClientRegistry
+	clients    ClientRepository
+}
+
+func NewRegistryClientRegistry(configured ClientRegistry, clients ClientRepository) ClientRegistry {
+	return &RegistryClientRegistry{configured: configured, clients: clients}
+}
+
+func (r *RegistryClientRegistry) Client(ctx context.Context, tenantID,
+	clientID string) (*StaticClient, error) {
+	if client, err := r.configured.Client(ctx, tenantID, clientID); err == nil {
+		return client, nil
+	}
+	registered, err := r.clients.Read(ctx, tenantID, clientID)
+	if err != nil {
+		return nil, err
+	}
+	// Same rule as the configured client: consent is deferred because these
+	// are first party, so one that is not fails rather than skipping a
+	// consent screen that does not exist.
+	if !registered.FirstParty {
+		return nil, ClientNotFirstPartyError{Value: clientID}
+	}
+	return &StaticClient{
+		ID:                     registered.ClientID,
+		SecretHash:             registered.SecretHash,
+		RedirectURIs:           registered.RedirectURIs,
+		PostLogoutRedirectURIs: registered.PostLogoutRedirectURIs,
+		FirstParty:             registered.FirstParty,
+		IDTokenLifetime:        r.idTokenLifetime(ctx, tenantID),
+	}, nil
+}
+
+// idTokenLifetime borrows the configured client's lifetime. A per-client
+// lifetime is a setting nobody has asked for, and two ways to answer the
+// question would be one too many.
+func (r *RegistryClientRegistry) idTokenLifetime(ctx context.Context, tenantID string) time.Duration {
+	if static, ok := r.configured.(*StaticClientRegistry); ok && static.client != nil {
+		return static.client.IDTokenLifetime
+	}
+	return 0
+}
+
+func (r *RegistryClientRegistry) Authenticate(ctx context.Context, tenantID, clientID,
+	secret string) error {
+	client, err := r.Client(ctx, tenantID, clientID)
+	if err != nil {
+		return err
+	}
+	if !utils.SafeCompare(utils.Sha256Hex(secret), client.SecretHash) {
+		return ClientAuthenticationError{}
+	}
+	return nil
+}
+
+func (r *RegistryClientRegistry) PostLogoutRedirect(ctx context.Context, tenantID, clientID,
+	redirectURI string) error {
+	// With no client id the configured client is the only thing that can be
+	// meant, which is what it already did.
+	if clientID == "" {
+		return r.configured.PostLogoutRedirect(ctx, tenantID, clientID, redirectURI)
+	}
+	client, err := r.Client(ctx, tenantID, clientID)
+	if err != nil {
+		return err
+	}
+	if !slices.Contains(client.PostLogoutRedirectURIs, redirectURI) {
+		return RedirectURINotAllowedError{Value: redirectURI}
+	}
+	return nil
+}
